@@ -2,9 +2,9 @@ use crate::chunk::Chunk;
 use crate::op::OpCode;
 use crate::value::Value;
 
+
 #[derive(Debug)]
-pub enum InterpretResult {
-    Ok,
+pub enum ErrorKind {
     CompileError,
     RuntimeError,
 }
@@ -23,14 +23,14 @@ impl VM {
         }
     }
 
-    pub fn interpret(&mut self, chunk: &Chunk) -> InterpretResult {
+    pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), ErrorKind> {
         for op in chunk.code.iter() {
             // Consider a debug output of op codes and stack state here as we go
             match op {
                 OpCode::Return => {
                     let ret = self.stack.pop().expect("Should have a value to pop");
                     println!("{ret}");
-                    return InterpretResult::Ok
+                    return Ok(())
                 }
                 OpCode::Constant { index } => {
                     let constant = chunk.read_constant(*index);
@@ -63,7 +63,7 @@ impl VM {
             }
         }
 
-        InterpretResult::RuntimeError
+        Err(ErrorKind::RuntimeError)
     }
 
     pub fn reset(&mut self) {
