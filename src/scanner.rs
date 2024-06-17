@@ -25,9 +25,9 @@ pub enum TokenType {
     Less,
     LessEqual,
     // Literals
-    Identifier,
-    String,
-    Number,
+    Identifier { name: String },
+    String { literal: String },
+    Number(f64),
     // Keywords
     And,
     Class,
@@ -51,7 +51,6 @@ pub enum TokenType {
 
 pub struct Token {
     pub ttype: TokenType,
-    pub value: Option<String>,
     pub line: u32,
 }
 
@@ -72,11 +71,49 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Advances the internal character iterator until non-whitespaces chars
+    /// are reached and comments are consumed
     fn skip_whitespace(&mut self) {
-        while let Some((_, whitespace_char)) = self.current.next_if(|(_, c)| c.is_whitespace()) {
-            if whitespace_char == '\n' {
+        while let Some((pos, peeked)) = self.current.peek() {
+            match peeked {
+                ' ' | '\t' | '\r' => {
+                    self.current.next();
+                }
+                '\n' => {
+                    self.line += 1;
+                    self.current.next();
+                }
+                '/' => {
+                    if &self.source[*pos..*pos + 2] == "//" {
+                        self.advance_to_newline();
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            };
+        }
+    }
+
+    fn advance_to_newline(&mut self) {
+        while let Some(_) = self.current.next_if(|(_, c)| *c != '\n') {}
+    }
+
+    fn make_string_literal(&mut self, start: usize) -> Token {
+        while let Some((_, c)) = self.current.next_if(|(_, c)| *c != '"') {
+            if c == '\n' {
                 self.line += 1;
             }
+        }
+
+        // Consume the ending "
+        let (end_pos, _) = self.current.next().expect("Unterminated string");
+
+        Token {
+            ttype: TokenType::String {
+                literal: String::from(&self.source[start + 1..end_pos]),
+            },
+            line: self.line,
         }
     }
 }
@@ -90,11 +127,10 @@ impl<'a> Iterator for Scanner<'a> {
         }
         self.skip_whitespace();
 
-        if let Some((_, next_char)) = self.current.next() {
+        if let Some((pos, next_char)) = self.current.next() {
             let make_token = |ttype| {
                 Some(Token {
                     ttype,
-                    value: None,
                     line: self.line,
                 })
             };
@@ -111,13 +147,41 @@ impl<'a> Iterator for Scanner<'a> {
                 '+' => make_token(TokenType::Plus),
                 '/' => make_token(TokenType::Slash),
                 '*' => make_token(TokenType::Star),
+                '!' => {
+                    if let Some(_) = self.current.next_if(|(_, c)| *c == '=') {
+                        make_token(TokenType::BangEqual)
+                    } else {
+                        make_token(TokenType::Bang)
+                    }
+                }
+                '=' => {
+                    if let Some(_) = self.current.next_if(|(_, c)| *c == '=') {
+                        make_token(TokenType::EqualEqual)
+                    } else {
+                        make_token(TokenType::Equal)
+                    }
+                }
+                '<' => {
+                    if let Some(_) = self.current.next_if(|(_, c)| *c == '=') {
+                        make_token(TokenType::LessEqual)
+                    } else {
+                        make_token(TokenType::Less)
+                    }
+                }
+                '>' => {
+                    if let Some(_) = self.current.next_if(|(_, c)| *c == '=') {
+                        make_token(TokenType::GreaterEqual)
+                    } else {
+                        make_token(TokenType::Greater)
+                    }
+                }
+                '"' => Some(self.make_string_literal(pos)),
                 _ => panic!("Unknown char '{next_char}'"),
             }
         } else {
             self.complete = true;
             Some(Token {
                 ttype: TokenType::Eof,
-                value: None,
                 line: self.line,
             })
         }
@@ -147,7 +211,19 @@ mod test {
     }
 
     #[test]
-    fn it_processes_single_character_tokens() {
+    fn it_consumes_comments() {
+        let source = "\
+        // This is a comment
+        !
+    ";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(vec![TokenType::Bang, TokenType::Eof], tokens);
+    }
+
+    #[test]
+    fn it_yields_single_character_tokens() {
         let source = "(){};,.-+/*";
         let scanner = Scanner::new(source);
         let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
@@ -172,9 +248,48 @@ mod test {
     }
 
     #[test]
+    fn it_yields_double_character_tokens() {
+        let source = "! != = == < <= > >=";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(
+            vec![
+                TokenType::Bang,
+                TokenType::BangEqual,
+                TokenType::Equal,
+                TokenType::EqualEqual,
+                TokenType::Less,
+                TokenType::LessEqual,
+                TokenType::Greater,
+                TokenType::GreaterEqual,
+                TokenType::Eof
+            ],
+            tokens
+        )
+    }
+
+    #[test]
+    fn it_consumes_string_literals() {
+        let source = "\"hello\"";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(
+            vec![
+                TokenType::String {
+                    literal: String::from("hello")
+                },
+                TokenType::Eof
+            ],
+            tokens
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn it_panics_for_unknown_chars() {
-        let source = "()%()";
+        let source = "%";
         let scanner = Scanner::new(source);
         let _tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
     }
