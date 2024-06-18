@@ -54,6 +54,7 @@ pub struct Token {
     pub line: u32,
 }
 
+/// Implements the Iterator interface to yield Lox tokens from a Lox source string.
 pub struct Scanner<'a> {
     source: &'a str,
     current: Peekable<CharIndices<'a>>,
@@ -62,6 +63,7 @@ pub struct Scanner<'a> {
 }
 
 impl<'a> Scanner<'a> {
+    /// Construct a new scanner from a source string.
     pub fn new(source: &str) -> Scanner {
         Scanner {
             source,
@@ -116,6 +118,28 @@ impl<'a> Scanner<'a> {
             line: self.line,
         }
     }
+
+    fn make_number_literal(&mut self, start: usize) -> Token {
+        let mut end = start;
+        while let Some((pos, _)) = self.current.next_if(|(_, c)| c.is_numeric()) {
+            end = pos;
+        }
+
+        if let Some(_) = self.current.next_if(|(_, c)| *c == '.') {
+            while let Some((pos, _)) = self.current.next_if(|(_, c)| c.is_numeric()) {
+                end = pos;
+            }
+        }
+
+        
+        let value_slice = &self.source[start..=end];
+        let value = value_slice.parse().expect("Value should be a valid float literal.");
+
+        Token {
+            ttype: TokenType::Number(value),
+            line: self.line,
+        }
+    }
 }
 
 impl<'a> Iterator for Scanner<'a> {
@@ -126,6 +150,13 @@ impl<'a> Iterator for Scanner<'a> {
             return None;
         }
         self.skip_whitespace();
+
+        if let Some((pos, next_char)) = self.current.peek() {
+            if next_char.is_ascii_digit() {
+                let start = pos.clone();
+                return Some(self.make_number_literal(start));
+            }
+        }
 
         if let Some((pos, next_char)) = self.current.next() {
             let make_token = |ttype| {
@@ -280,6 +311,22 @@ mod test {
                 TokenType::String {
                     literal: String::from("hello")
                 },
+                TokenType::Eof
+            ],
+            tokens
+        );
+    }
+
+    #[test]
+    fn it_consumes_number_literals() {
+        let source = "42.0 7";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(
+            vec![
+                TokenType::Number(42.0),
+                TokenType::Number(7.0),
                 TokenType::Eof
             ],
             tokens
