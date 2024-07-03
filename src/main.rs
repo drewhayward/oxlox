@@ -1,4 +1,4 @@
-use oxlox::{chunk::Chunk, op::OpCode, vm::VM};
+use oxlox::vm::{Chunk, OpCode, VM};
 
 fn main() {
     let mut chunk = Chunk::new();

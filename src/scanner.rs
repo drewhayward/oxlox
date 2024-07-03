@@ -2,7 +2,7 @@ use core::panic;
 use std::iter::Peekable;
 use std::str::{self, CharIndices};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TokenType {
     LeftParen,
     RightParen,
@@ -50,6 +50,7 @@ pub enum TokenType {
     Eof,
 }
 
+#[derive(Debug, Clone)]
 pub struct Token {
     pub ttype: TokenType,
     pub line: u32,
@@ -186,6 +187,7 @@ impl<'a> Scanner<'a> {
 impl<'a> Iterator for Scanner<'a> {
     type Item = Token;
 
+    // TODO: Make this return Result and handle failures in the compiler
     fn next(&mut self) -> Option<Self::Item> {
         if self.complete {
             return None;
@@ -404,7 +406,8 @@ mod test {
 
     #[test]
     fn it_consumes_keywords() {
-        let source = "and class else false for fun if nil or print return super this true var while error";
+        let source =
+            "and class else false for fun if nil or print return super this true var while error";
         let scanner = Scanner::new(source);
         let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
 
