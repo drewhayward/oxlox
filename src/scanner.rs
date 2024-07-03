@@ -46,6 +46,7 @@ pub enum TokenType {
     Var,
     While,
     Error,
+    // Special EOF token
     Eof,
 }
 
@@ -131,12 +132,52 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        
         let value_slice = &self.source[start..=end];
-        let value = value_slice.parse().expect("Value should be a valid float literal.");
+        let value = value_slice
+            .parse()
+            .expect("Value should be a valid float literal.");
 
         Token {
             ttype: TokenType::Number(value),
+            line: self.line,
+        }
+    }
+
+    fn make_identifier_or_keyword(&mut self, start: usize) -> Token {
+        let mut end = start;
+
+        while let Some((pos, _)) = self
+            .current
+            .next_if(|(_, c)| c.is_alphabetic() || c.is_numeric() || *c == '_')
+        {
+            end = pos;
+        }
+
+        let identifier = self.source[start..=end].to_string();
+
+        let ttype = match identifier.as_str() {
+            "and" => TokenType::And,
+            "class" => TokenType::Class,
+            "else" => TokenType::Else,
+            "false" => TokenType::False,
+            "for" => TokenType::For,
+            "fun" => TokenType::Fun,
+            "if" => TokenType::If,
+            "nil" => TokenType::Nil,
+            "or" => TokenType::Or,
+            "print" => TokenType::Print,
+            "return" => TokenType::Return,
+            "super" => TokenType::Super,
+            "this" => TokenType::This,
+            "true" => TokenType::True,
+            "var" => TokenType::Var,
+            "while" => TokenType::While,
+            "error" => TokenType::Error,
+            _ => TokenType::Identifier { name: identifier },
+        };
+
+        Token {
+            ttype,
             line: self.line,
         }
     }
@@ -149,12 +190,14 @@ impl<'a> Iterator for Scanner<'a> {
         if self.complete {
             return None;
         }
-        self.skip_whitespace();
+        self.skip_whitespace(); // And comments
 
         if let Some((pos, next_char)) = self.current.peek() {
+            let start = pos.clone();
             if next_char.is_ascii_digit() {
-                let start = pos.clone();
                 return Some(self.make_number_literal(start));
+            } else if next_char.is_ascii_alphabetic() || *next_char == '_' {
+                return Some(self.make_identifier_or_keyword(start));
             }
         }
 
@@ -328,6 +371,63 @@ mod test {
                 TokenType::Number(42.0),
                 TokenType::Number(7.0),
                 TokenType::Eof
+            ],
+            tokens
+        );
+    }
+
+    #[test]
+    fn it_consumes_identifiers() {
+        let source = "test hello num1 foo_bar";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(
+            vec![
+                TokenType::Identifier {
+                    name: String::from("test")
+                },
+                TokenType::Identifier {
+                    name: String::from("hello")
+                },
+                TokenType::Identifier {
+                    name: String::from("num1")
+                },
+                TokenType::Identifier {
+                    name: String::from("foo_bar")
+                },
+                TokenType::Eof
+            ],
+            tokens
+        );
+    }
+
+    #[test]
+    fn it_consumes_keywords() {
+        let source = "and class else false for fun if nil or print return super this true var while error";
+        let scanner = Scanner::new(source);
+        let tokens: Vec<_> = scanner.map(|t| t.ttype).collect();
+
+        assert_eq!(
+            vec![
+                TokenType::And,
+                TokenType::Class,
+                TokenType::Else,
+                TokenType::False,
+                TokenType::For,
+                TokenType::Fun,
+                TokenType::If,
+                TokenType::Nil,
+                TokenType::Or,
+                TokenType::Print,
+                TokenType::Return,
+                TokenType::Super,
+                TokenType::This,
+                TokenType::True,
+                TokenType::Var,
+                TokenType::While,
+                TokenType::Error,
+                TokenType::Eof,
             ],
             tokens
         );
