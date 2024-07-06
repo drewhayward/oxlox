@@ -20,8 +20,12 @@ fn run(args: Vec<String>) {
     let scanner = oxlox::scanner::Scanner::new(&source);
     let tokens: Vec<_> = scanner.collect();
 
+    println!("{:?}", tokens);
+
     let mut compiler = oxlox::compiler::Compiler::new(tokens);
     let code_chunk = compiler.compile();
+
+    code_chunk.disassemble("Complied");
 
     let mut vm = oxlox::vm::VM::new();
     let _ = vm.interpret(&code_chunk);

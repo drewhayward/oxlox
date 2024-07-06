@@ -1,3 +1,5 @@
+use core::panic;
+
 use crate::{
     scanner::{Token, TokenType},
     vm,
@@ -5,7 +7,7 @@ use crate::{
 
 // TODO: Convert expectations in this module into properly handled errors.
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, PartialOrd)]
 enum Precedence {
     None,
     Assignment,
@@ -21,7 +23,24 @@ enum Precedence {
 }
 
 impl Precedence {
-    fn from_prefix_token(ttype: TokenType) -> Precedence {
+    /// Return the next highest precedence. Returns the same precedence if already at the highest
+    fn successor(&self) -> Precedence {
+        match *self {
+            Self::None => Self::Assignment,
+            Self::Assignment => Self::Or,
+            Self::Or => Self::And,
+            Self::And => Self::Equality,
+            Self::Equality => Self::Comparison,
+            Self::Comparison => Self::Term,
+            Self::Term => Self::Factor,
+            Self::Factor => Self::Unary,
+            Self::Unary => Self::Call,
+            Self::Call => Self::Primary,
+            Self::Primary => Self::Primary,
+        }
+    }
+
+    fn from_token(ttype: &TokenType) -> Precedence {
         match ttype {
             TokenType::Equal => Precedence::Assignment,
             TokenType::Or => Precedence::Or,
@@ -38,10 +57,15 @@ impl Precedence {
             TokenType::Slash => Precedence::Factor,
             TokenType::Bang => Precedence::Unary,
             // TODO: Handle this case?
+            // TokenType::Minus => Precedence::Call,
             TokenType::Dot => Precedence::Call,
             _ => Precedence::None,
         }
     }
+}
+
+pub enum CompilationError {
+    UnexpectedToken,
 }
 
 #[derive(Debug)]
@@ -67,9 +91,13 @@ impl Compiler {
     }
 
     pub fn compile(&mut self) -> vm::Chunk {
+        // Create new compliation chunk
         self.current_chunk = Some(vm::Chunk::new());
 
+        self.parse_expression();
+
         self.consume_token(TokenType::Eof);
+        self.emit_op(vm::OpCode::Return);
 
         // TODO: Return proper error here
         if self.has_tokens() {
@@ -147,20 +175,92 @@ impl Compiler {
 
     fn parse_stmt(&mut self) {}
 
-    fn parse_expression(&mut self) {}
+    fn parse_expression(&mut self) {
+        self.parse_expr_w_precedence(Precedence::Assignment);
+    }
 
     /// Parse an expression of a specific precedence level or higher.
     fn parse_expr_w_precedence(&mut self, prec: Precedence) {
+        self.advance_token();
+
         // Check for prefix rule
+        let previous_ttype = self.previous_token().ttype;
+        let prefix_handler = self
+            .lookup_prefix_handler(previous_ttype)
+            .expect("There should be a prefix rule");
+        prefix_handler(self);
 
-        // Check for infix rule
+        // Check for infix rules while the observed prec is the same or higher
+        while prec <= Precedence::from_token(&self.current_token().ttype) {
+            self.advance_token();
+            let previous_ttype = self.previous_token().ttype;
+            let infix_handler = self
+                .lookup_infix_handler(previous_ttype)
+                .expect("Infix rule should exist if the precedence is higher for this token.");
 
-        // Check for post-fix rule?
+            infix_handler(self);
+        }
     }
 
-    fn parse_number(&mut self) {
-        //self.current_chunk()
-        //self.emit_op()
+    fn lookup_prefix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler) -> ()> {
+        match ttype {
+            TokenType::Number(_) => Some(Compiler::handle_parse_number),
+            TokenType::LeftParen => Some(Compiler::handle_parse_grouping),
+            _ => None,
+        }
+    }
+
+    fn lookup_infix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler) -> ()> {
+        match ttype {
+            TokenType::Plus => Some(Compiler::handle_parse_binary),
+            TokenType::Minus => Some(Compiler::handle_parse_binary),
+            TokenType::Star => Some(Compiler::handle_parse_binary),
+            TokenType::Slash => Some(Compiler::handle_parse_binary),
+            _ => None,
+        }
+    }
+
+    fn handle_parse_number(&mut self) {
+        if let Token {
+            ttype: TokenType::Number(value),
+            ..
+        } = self.previous_token()
+        {
+            self.emit_constant(value)
+        }
+        // TODO: handle token error
+    }
+
+    fn handle_parse_grouping(&mut self) {
+        self.parse_expression();
+        self.consume_token(TokenType::RightParen);
+    }
+
+    fn handle_parse_unary(&mut self) {
+        let operator_type = self.previous_token().ttype;
+
+        // Parse the unary operand
+        self.parse_expr_w_precedence(Precedence::Unary);
+
+        match operator_type {
+            TokenType::Minus => self.emit_op(vm::OpCode::Negate),
+            _ => unreachable!(),
+        };
+    }
+
+    fn handle_parse_binary(&mut self) {
+        let op_type = self.previous_token().ttype;
+        let op_precedence = Precedence::from_token(&op_type);
+
+        self.parse_expr_w_precedence(op_precedence.successor());
+
+        match op_type {
+            TokenType::Plus => self.emit_op(vm::OpCode::Add),
+            TokenType::Minus => self.emit_op(vm::OpCode::Subtract),
+            TokenType::Star => self.emit_op(vm::OpCode::Multiply),
+            TokenType::Slash => self.emit_op(vm::OpCode::Divide),
+            _ => unreachable!(),
+        }
     }
 
     /* Byte code emitters */
@@ -177,25 +277,17 @@ impl Compiler {
         let chunk = self.current_chunk().expect("Chunk should be defined.");
         chunk.write_op(op, line);
         chunk.write(arg, line);
-        
     }
 
     fn emit_constant(&mut self, value: vm::Value) {
-        let line = self.previous_token().line;
         let chunk = self.current_chunk().expect("Chunk should be defined.");
-
         let index = chunk.add_constant(value);
         self.emit_op_and_arg(vm::OpCode::Constant, index)
     }
-
-
-
 }
 
 #[cfg(test)]
 mod test {
-    use crate::vm::{self, OpCode};
-
     use super::*;
 
     fn ttypes_to_tokens(ttypes: Vec<TokenType>) -> Vec<Token> {
