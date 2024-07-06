@@ -1,9 +1,9 @@
 pub type Value = f64;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum OpCode {
     Return,
-    Constant { index: usize },
+    Constant,
     Negate,
     Add,
     Subtract,
@@ -11,10 +11,38 @@ pub enum OpCode {
     Divide,
 }
 
+impl OpCode {
+    // Returns the number of arguments this opcode expects in the bytecode
+    fn arity(&self) -> i32 {
+        match *self {
+            Self::Constant => 1,
+            _ => 0,
+        }
+    }
+}
+
+// Need to be able to cast bytes back into op codes
+// Could use a crate for this but we'll avoid the dependency for now
+impl TryFrom<u8> for OpCode {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            x if x == OpCode::Return as u8 => Ok(OpCode::Return),
+            x if x == OpCode::Constant as u8 => Ok(OpCode::Constant),
+            x if x == OpCode::Negate as u8 => Ok(OpCode::Negate),
+            x if x == OpCode::Add as u8 => Ok(OpCode::Add),
+            x if x == OpCode::Subtract as u8 => Ok(OpCode::Subtract),
+            x if x == OpCode::Multiply as u8 => Ok(OpCode::Multiply),
+            x if x == OpCode::Divide as u8 => Ok(OpCode::Divide),
+            _ => Err(()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Chunk {
-    pub code: Vec<OpCode>,
+    pub code: Vec<u8>,
     pub values: Vec<Value>,
     pub line_nums: Vec<u32>,
 }
@@ -28,24 +56,40 @@ impl Chunk {
         }
     }
 
-    pub fn write(&mut self, op: OpCode, line_num: u32) {
-        self.code.push(op);
+    pub fn write(&mut self, byte: u8, line_num: u32) {
+        self.code.push(byte);
         self.line_nums.push(line_num);
     }
 
-    pub fn add_constant(&mut self, value: Value) -> usize {
-        self.values.push(value);
-        self.values.len() - 1
+    pub fn write_op(&mut self, op: OpCode, line_num: u32) {
+        self.write(op as u8, line_num)
     }
 
-    pub fn read_constant(&self, index: usize) -> Value {
-        return self.values[index]
+    pub fn add_constant(&mut self, value: Value) -> u8 {
+        if self.values.len() >= <u8 as Into<usize>>::into(std::u8::MAX) + 1 {
+            panic!("Attempted to add more than 256 constants to a code chunk")
+        }
+
+        self.values.push(value);
+        (self.values.len() - 1) as u8
+    }
+
+    pub fn read_constant(&self, index: u8) -> Value {
+        return self.values[index as usize];
     }
 
     pub fn disassemble(&self, name: &str) {
         println!("== {} ==", name);
-        for (i, (op, line)) in self.code.iter().zip(self.line_nums.iter()).enumerate() {
-            println!("{:04} {} {:?}", i, line, op);
+        let mut byte_iter = self.code.iter().zip(self.line_nums.iter()).enumerate();
+        while let Some((i, (op, line))) = byte_iter.next() {
+            let op_code: OpCode = u8::try_into(*op).expect("Byte should be a valid OpCode");
+            println!("{:04} {} {:?}", i, line, op_code);
+
+            for _ in 0..op_code.arity() {
+                let (i, (op, line)) = byte_iter.next().expect("Argument byte expected");
+
+                println!("{:04} {} {:?}", i, line, op);
+            }
         }
     }
 }
@@ -71,17 +115,22 @@ impl VM {
     }
 
     pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), ErrorKind> {
-        for op in chunk.code.iter() {
+        let mut ip = chunk.code.iter();
+        while let Some(current_byte) = ip.next() {
+            let op: OpCode = u8::try_into(*current_byte)
+                .expect("Attempted to decode a byte which is not a valid OpCode");
+
             // Consider a debug output of op codes and stack state here as we go
             match op {
                 OpCode::Return => {
-                    let ret = self.stack.pop().expect("Should have a value to pop");
+                    let ret = self.stack.pop().expect("Should have a value to pop.");
                     println!("{ret}");
-                    return Ok(())
+                    return Ok(());
                 }
-                OpCode::Constant { index } => {
-                    let constant = chunk.read_constant(*index);
-                    self.stack.push(constant)
+                OpCode::Constant => {
+                    let index = *ip.next().expect("Expected index following constant op.");
+                    let constant = chunk.read_constant(index);
+                    self.stack.push(constant);
                 }
                 OpCode::Negate => {
                     let value = self.stack.pop().expect("Stack should have a value.");
@@ -93,18 +142,36 @@ impl VM {
                     self.stack.push(lhs + rhs);
                 }
                 OpCode::Subtract => {
-                    let rhs = self.stack.pop().expect("Should have an RHS value to subtract");
-                    let lhs = self.stack.pop().expect("Should have an LHS value to subtract");
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to subtract");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to subtract");
                     self.stack.push(lhs - rhs);
                 }
                 OpCode::Multiply => {
-                    let rhs = self.stack.pop().expect("Should have an RHS value to multiply");
-                    let lhs = self.stack.pop().expect("Should have an LHS value to multiply");
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to multiply");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to multiply");
                     self.stack.push(lhs * rhs);
                 }
                 OpCode::Divide => {
-                    let rhs = self.stack.pop().expect("Should have an RHS value to divide");
-                    let lhs = self.stack.pop().expect("Should have an LHS value to divide");
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
                     self.stack.push(lhs / rhs);
                 }
             }
@@ -115,5 +182,42 @@ impl VM {
 
     pub fn reset(&mut self) {
         self.stack.clear()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn chunk_can_write_ops() {
+        let mut chunk = Chunk::new();
+        let ops = vec![OpCode::Add, OpCode::Subtract, OpCode::Multiply];
+        let op_bytes: Vec<_> = ops.iter().cloned().map(|op| op as u8).collect();
+
+        for op in ops {
+            chunk.write_op(op, 1);
+        }
+
+        assert_eq!(chunk.code, op_bytes)
+    }
+
+    #[test]
+    fn chunk_reads_its_writes() {
+        let mut c = Chunk::new();
+        let value = 42.0;
+        let index = c.add_constant(value);
+        assert_eq!(value, c.read_constant(index));
+    }
+
+    #[test]
+    #[should_panic]
+    fn chunk_panics_for_more_than_256_constants() {
+        let mut c = Chunk::new();
+        let value = 42.0;
+
+        for _ in 0..=255 + 1 {
+            let _ = c.add_constant(value);
+        }
     }
 }
