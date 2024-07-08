@@ -5,6 +5,24 @@ pub enum Value {
     Bool(bool),
 }
 
+impl Value {
+    fn equal(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
+            (Self::Nil, _) => true,
+            (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+
+    fn is_falsey(&self) -> bool {
+        match self {
+            Self::Nil | Self::Bool(false) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum OpCode {
     Return,
@@ -14,6 +32,13 @@ pub enum OpCode {
     Subtract,
     Multiply,
     Divide,
+    Nil,
+    True,
+    False,
+    Not,
+    Equal,
+    Greater,
+    Less,
 }
 
 impl OpCode {
@@ -40,6 +65,13 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::Subtract as u8 => Ok(OpCode::Subtract),
             x if x == OpCode::Multiply as u8 => Ok(OpCode::Multiply),
             x if x == OpCode::Divide as u8 => Ok(OpCode::Divide),
+            x if x == OpCode::Nil as u8 => Ok(OpCode::Nil),
+            x if x == OpCode::True as u8 => Ok(OpCode::True),
+            x if x == OpCode::False as u8 => Ok(OpCode::False),
+            x if x == OpCode::Not as u8 => Ok(OpCode::Not),
+            x if x == OpCode::Equal as u8 => Ok(OpCode::Equal),
+            x if x == OpCode::Greater as u8 => Ok(OpCode::Greater),
+            x if x == OpCode::Less as u8 => Ok(OpCode::Less),
             _ => Err(()),
         }
     }
@@ -102,7 +134,7 @@ impl Chunk {
 #[derive(Debug)]
 pub enum RuntimeError {
     /// Tried to use a value of an incorrect type.
-    TypeError,
+    TypeError(String),
     /// Attempted to divide by zero.
     DivideByZero,
     /// Code chunk ended without a return instruction.
@@ -152,7 +184,9 @@ impl VM {
                     if let Value::Number(num_value) = value {
                         self.stack.push(Value::Number(-num_value));
                     } else {
-                        return Err(RuntimeError::TypeError);
+                        return Err(RuntimeError::TypeError(
+                            "Operand should be a number.".to_string(),
+                        ));
                     }
                 }
                 OpCode::Add => {
@@ -163,7 +197,11 @@ impl VM {
                         (Value::Number(lhs_value), Value::Number(rhs_value)) => {
                             self.stack.push(Value::Number(lhs_value + rhs_value))
                         }
-                        _ => return Err(RuntimeError::TypeError),
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
                     }
                 }
                 OpCode::Subtract => {
@@ -180,7 +218,11 @@ impl VM {
                         (Value::Number(lhs_value), Value::Number(rhs_value)) => {
                             self.stack.push(Value::Number(lhs_value - rhs_value))
                         }
-                        _ => return Err(RuntimeError::TypeError),
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
                     }
                 }
                 OpCode::Multiply => {
@@ -196,7 +238,11 @@ impl VM {
                         (Value::Number(lhs_value), Value::Number(rhs_value)) => {
                             self.stack.push(Value::Number(lhs_value * rhs_value))
                         }
-                        _ => return Err(RuntimeError::TypeError),
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
                     }
                 }
                 OpCode::Divide => {
@@ -212,7 +258,71 @@ impl VM {
                         (Value::Number(lhs_value), Value::Number(rhs_value)) => {
                             self.stack.push(Value::Number(lhs_value / rhs_value))
                         }
-                        _ => return Err(RuntimeError::TypeError),
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Nil => self.stack.push(Value::Nil),
+                OpCode::True => self.stack.push(Value::Bool(true)),
+                OpCode::False => self.stack.push(Value::Bool(false)),
+                OpCode::Not => match self.stack.pop() {
+                    Some(value) => self.stack.push(Value::Bool(value.is_falsey())),
+                    None => panic!("Value should exist"),
+                },
+                OpCode::Equal => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+                    self.stack.push(Value::Bool(lhs.equal(&rhs)));
+                }
+                OpCode::Greater => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Bool(lhs_value > rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Less => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Bool(lhs_value < rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
                     }
                 }
             }

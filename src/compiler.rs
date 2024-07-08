@@ -1,5 +1,3 @@
-use core::panic;
-
 use crate::{
     scanner::{Token, TokenType},
     vm,
@@ -215,9 +213,13 @@ impl Compiler {
 
     fn lookup_prefix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler) -> ()> {
         match ttype {
+            TokenType::Nil => Some(Compiler::handle_parse_literal),
+            TokenType::True => Some(Compiler::handle_parse_literal),
+            TokenType::False => Some(Compiler::handle_parse_literal),
             TokenType::Number(_) => Some(Compiler::handle_parse_number),
             TokenType::LeftParen => Some(Compiler::handle_parse_grouping),
             TokenType::Minus => Some(Compiler::handle_parse_unary),
+            TokenType::Bang => Some(Compiler::handle_parse_unary),
             _ => None,
         }
     }
@@ -228,6 +230,13 @@ impl Compiler {
             TokenType::Minus => Some(Compiler::handle_parse_binary),
             TokenType::Star => Some(Compiler::handle_parse_binary),
             TokenType::Slash => Some(Compiler::handle_parse_binary),
+            // Logical comparison
+            TokenType::EqualEqual => Some(Compiler::handle_parse_binary),
+            TokenType::BangEqual => Some(Compiler::handle_parse_binary),
+            TokenType::Greater => Some(Compiler::handle_parse_binary),
+            TokenType::GreaterEqual => Some(Compiler::handle_parse_binary),
+            TokenType::Less => Some(Compiler::handle_parse_binary),
+            TokenType::LessEqual => Some(Compiler::handle_parse_binary),
             _ => None,
         }
     }
@@ -243,6 +252,15 @@ impl Compiler {
         // TODO: handle token error
     }
 
+    fn handle_parse_literal(&mut self) {
+        match self.previous_token().ttype {
+            TokenType::Nil => self.emit_op(vm::OpCode::Nil),
+            TokenType::True => self.emit_op(vm::OpCode::True),
+            TokenType::False => self.emit_op(vm::OpCode::False),
+            _ => panic!("Unexpected token type {:?}", self.previous_token().ttype),
+        }
+    }
+
     fn handle_parse_grouping(&mut self) {
         self.parse_expression();
         self.consume_token(TokenType::RightParen);
@@ -256,6 +274,7 @@ impl Compiler {
 
         match operator_type {
             TokenType::Minus => self.emit_op(vm::OpCode::Negate),
+            TokenType::Bang => self.emit_op(vm::OpCode::Not),
             _ => unreachable!(),
         };
     }
@@ -267,6 +286,21 @@ impl Compiler {
         self.parse_expr_w_precedence(op_precedence.successor());
 
         match op_type {
+            TokenType::BangEqual => {
+                self.emit_op(vm::OpCode::Equal);
+                self.emit_op(vm::OpCode::Not);
+            }
+            TokenType::EqualEqual => self.emit_op(vm::OpCode::Equal),
+            TokenType::Greater => self.emit_op(vm::OpCode::Greater),
+            TokenType::GreaterEqual => {
+                self.emit_op(vm::OpCode::Less);
+                self.emit_op(vm::OpCode::Not);
+            },
+            TokenType::Less => self.emit_op(vm::OpCode::Less),
+            TokenType::LessEqual => {
+                self.emit_op(vm::OpCode::Greater);
+                self.emit_op(vm::OpCode::Not);
+            },
             TokenType::Plus => self.emit_op(vm::OpCode::Add),
             TokenType::Minus => self.emit_op(vm::OpCode::Subtract),
             TokenType::Star => self.emit_op(vm::OpCode::Multiply),
@@ -317,13 +351,4 @@ mod test {
 
         assert!(chunk.code.len() == 0, "Chunk should be empty")
     }
-
-    //#[test]
-    //fn it_compiles_numbers() {
-    //    let input_tokens: Vec<_> = ttypes_to_tokens(vec![TokenType::Number(1.0), TokenType::Eof]);
-    //    let mut compiler = Compiler::new(input_tokens);
-    //    let chunk = compiler.compile();
-    //
-    //    assert_eq!(vec![OpCode::Constant { index: 0 }], chunk.code)
-    //}
 }
