@@ -1,4 +1,9 @@
-pub type Value = f64;
+#[derive(Debug, PartialEq, Clone)]
+pub enum Value {
+    Nil,
+    Number(f64),
+    Bool(bool),
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum OpCode {
@@ -75,7 +80,7 @@ impl Chunk {
     }
 
     pub fn read_constant(&self, index: u8) -> Value {
-        return self.values[index as usize];
+        return self.values[index as usize].clone();
     }
 
     pub fn disassemble(&self, name: &str) {
@@ -95,9 +100,19 @@ impl Chunk {
 }
 
 #[derive(Debug)]
+pub enum RuntimeError {
+    /// Tried to use a value of an incorrect type.
+    TypeError,
+    /// Attempted to divide by zero.
+    DivideByZero,
+    /// Code chunk ended without a return instruction.
+    NoReturn,
+}
+
+#[derive(Debug)]
 pub enum ErrorKind {
     CompileError,
-    RuntimeError,
+    VmError(RuntimeError),
 }
 
 #[derive(Debug)]
@@ -114,7 +129,7 @@ impl VM {
         }
     }
 
-    pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), ErrorKind> {
+    pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), RuntimeError> {
         let mut ip = chunk.code.iter();
         while let Some(current_byte) = ip.next() {
             let op: OpCode = u8::try_into(*current_byte)
@@ -124,7 +139,7 @@ impl VM {
             match op {
                 OpCode::Return => {
                     let ret = self.stack.pop().expect("Should have a value to pop.");
-                    println!("{ret}");
+                    println!("{:?}", ret);
                     return Ok(());
                 }
                 OpCode::Constant => {
@@ -134,12 +149,22 @@ impl VM {
                 }
                 OpCode::Negate => {
                     let value = self.stack.pop().expect("Stack should have a value.");
-                    self.stack.push(-value);
+                    if let Value::Number(num_value) = value {
+                        self.stack.push(Value::Number(-num_value));
+                    } else {
+                        return Err(RuntimeError::TypeError);
+                    }
                 }
                 OpCode::Add => {
                     let rhs = self.stack.pop().expect("Should have an RHS value to add");
                     let lhs = self.stack.pop().expect("Should have an LHS value to add");
-                    self.stack.push(lhs + rhs);
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value + rhs_value))
+                        }
+                        _ => return Err(RuntimeError::TypeError),
+                    }
                 }
                 OpCode::Subtract => {
                     let rhs = self
@@ -150,7 +175,13 @@ impl VM {
                         .stack
                         .pop()
                         .expect("Should have an LHS value to subtract");
-                    self.stack.push(lhs - rhs);
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value - rhs_value))
+                        }
+                        _ => return Err(RuntimeError::TypeError),
+                    }
                 }
                 OpCode::Multiply => {
                     let rhs = self
@@ -161,7 +192,12 @@ impl VM {
                         .stack
                         .pop()
                         .expect("Should have an LHS value to multiply");
-                    self.stack.push(lhs * rhs);
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value * rhs_value))
+                        }
+                        _ => return Err(RuntimeError::TypeError),
+                    }
                 }
                 OpCode::Divide => {
                     let rhs = self
@@ -172,12 +208,17 @@ impl VM {
                         .stack
                         .pop()
                         .expect("Should have an LHS value to divide");
-                    self.stack.push(lhs / rhs);
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value / rhs_value))
+                        }
+                        _ => return Err(RuntimeError::TypeError),
+                    }
                 }
             }
         }
 
-        Err(ErrorKind::RuntimeError)
+        Err(RuntimeError::NoReturn)
     }
 
     pub fn reset(&mut self) {
@@ -206,8 +247,8 @@ mod test {
     fn chunk_reads_its_writes() {
         let mut c = Chunk::new();
         let value = 42.0;
-        let index = c.add_constant(value);
-        assert_eq!(value, c.read_constant(index));
+        let index = c.add_constant(Value::Number(value));
+        assert_eq!(Value::Number(value), c.read_constant(index));
     }
 
     #[test]
@@ -217,7 +258,7 @@ mod test {
         let value = 42.0;
 
         for _ in 0..=255 + 1 {
-            let _ = c.add_constant(value);
+            let _ = c.add_constant(Value::Number(value));
         }
     }
 }

@@ -64,8 +64,12 @@ impl Precedence {
     }
 }
 
+#[derive(Debug)]
 pub enum CompilationError {
-    UnexpectedToken,
+    /// The compiler did not expect to see a token of the given type in its current state.
+    UnexpectedToken(TokenType),
+    /// Tokens remained after the completion of the complier.
+    UnparsedTokens,
 }
 
 #[derive(Debug)]
@@ -90,7 +94,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self) -> vm::Chunk {
+    pub fn compile(&mut self) -> Result<vm::Chunk, CompilationError> {
         // Create new compliation chunk
         self.current_chunk = Some(vm::Chunk::new());
 
@@ -101,12 +105,13 @@ impl Compiler {
 
         // TODO: Return proper error here
         if self.has_tokens() {
-            panic!("Tokens remaining after Eof");
+            return Err(CompilationError::UnparsedTokens);
         }
 
-        self.current_chunk
-            .take()
-            .expect("Chunk should be defined after compilation")
+        match self.current_chunk.take() {
+            Some(chunk) => Ok(chunk),
+            None => panic!("Chunk should be defined."),
+        }
     }
 
     fn current_chunk(&mut self) -> Option<&mut vm::Chunk> {
@@ -131,7 +136,7 @@ impl Compiler {
 
     /// Return a copy of the previous token. This is the most-recently consumed
     /// token.
-    fn previous_token(&mut self) -> Token {
+    fn previous_token(&self) -> Token {
         self.tokens
             .get(self.position - 1)
             .expect("Tried to get a position outside the token buffer.")
@@ -140,7 +145,7 @@ impl Compiler {
 
     /// Return a copy of the current token being examined. This token has NOT
     /// been consumed.
-    fn current_token(&mut self) -> Token {
+    fn current_token(&self) -> Token {
         self.tokens
             .get(self.position)
             .expect("Tried to get a position outside the token buffer.")
@@ -160,16 +165,22 @@ impl Compiler {
     /// Panics if the token doesn't match the expected type.
     fn consume_token(&mut self, expected_ttype: TokenType) {
         // TODO: Handle error cases gracefully
+        let current_ttype = self.current_token().ttype;
         assert!(
-            self.current_token().ttype == expected_ttype,
+            current_ttype == expected_ttype,
             "Expected a token of {:?}",
             expected_ttype
+        );
+
+        self.error_at(
+            &self.current_token(),
+            format!("Unexpected token: {:?}", current_ttype).as_str(),
         );
         self.advance_token();
     }
 
     /// Returns true if there are more non-EOF tokens to consume.
-    fn has_tokens(&mut self) -> bool {
+    fn has_tokens(&self) -> bool {
         self.position < self.tokens.len() && self.current_token().ttype != TokenType::Eof
     }
 
@@ -206,6 +217,7 @@ impl Compiler {
         match ttype {
             TokenType::Number(_) => Some(Compiler::handle_parse_number),
             TokenType::LeftParen => Some(Compiler::handle_parse_grouping),
+            TokenType::Minus => Some(Compiler::handle_parse_unary),
             _ => None,
         }
     }
@@ -226,7 +238,7 @@ impl Compiler {
             ..
         } = self.previous_token()
         {
-            self.emit_constant(value)
+            self.emit_constant(vm::Value::Number(value))
         }
         // TODO: handle token error
     }
@@ -301,7 +313,7 @@ mod test {
     fn it_emits_chunks() {
         let input_tokens: Vec<_> = ttypes_to_tokens(vec![TokenType::Eof]);
         let mut compiler = Compiler::new(input_tokens);
-        let chunk = compiler.compile();
+        let chunk = compiler.compile().unwrap();
 
         assert!(chunk.code.len() == 0, "Chunk should be empty")
     }

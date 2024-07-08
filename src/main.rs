@@ -23,7 +23,7 @@ fn run(args: Vec<String>) {
     println!("{:?}", tokens);
 
     let mut compiler = oxlox::compiler::Compiler::new(tokens);
-    let code_chunk = compiler.compile();
+    let code_chunk = compiler.compile().unwrap();
 
     code_chunk.disassemble("Complied");
 
