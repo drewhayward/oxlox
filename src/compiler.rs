@@ -1,3 +1,6 @@
+use core::panic;
+use std::rc::Rc;
+
 use crate::{
     scanner::{Token, TokenType},
     vm,
@@ -66,8 +69,6 @@ impl Precedence {
 pub enum CompilationError {
     /// The compiler did not expect to see a token of the given type in its current state.
     UnexpectedToken(TokenType),
-    /// Tokens remained after the completion of the complier.
-    UnparsedTokens,
 }
 
 #[derive(Debug)]
@@ -96,14 +97,16 @@ impl Compiler {
         // Create new compliation chunk
         self.current_chunk = Some(vm::Chunk::new());
 
-        self.parse_expression();
+        while !self.match_token(TokenType::Eof) {
+            self.parse_expression();
+            // TODO: How to guarantee that we are actually making progress through the tokens?
+        }
 
-        self.consume_token(TokenType::Eof);
-        self.emit_op(vm::OpCode::Return);
+        //self.emit_op(vm::OpCode::Return);
 
         // TODO: Return proper error here
         if self.has_tokens() {
-            return Err(CompilationError::UnparsedTokens);
+            panic!("Tokens remained after the EOF token")
         }
 
         match self.current_chunk.take() {
@@ -159,6 +162,15 @@ impl Compiler {
         tok
     }
 
+    fn match_token(&mut self, expected_ttype: TokenType) -> bool {
+        if self.current_token().ttype == expected_ttype {
+            self.advance_token();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Advance the compiler assuming the current token matches the expected type.
     /// Panics if the token doesn't match the expected type.
     fn consume_token(&mut self, expected_ttype: TokenType) {
@@ -182,7 +194,18 @@ impl Compiler {
         self.position < self.tokens.len() && self.current_token().ttype != TokenType::Eof
     }
 
-    fn parse_stmt(&mut self) {}
+    fn parse_declaration(&mut self) {
+        self.parse_stmt();
+    }
+
+    fn parse_stmt(&mut self) {
+        match self.current_token().ttype {
+            TokenType::Print =>  {}
+            _ => self.error_at(&self.current_token(), "Unexpected token to start statements.")
+        }
+    }
+
+
 
     fn parse_expression(&mut self) {
         self.parse_expr_w_precedence(Precedence::Assignment);
@@ -220,6 +243,7 @@ impl Compiler {
             TokenType::LeftParen => Some(Compiler::handle_parse_grouping),
             TokenType::Minus => Some(Compiler::handle_parse_unary),
             TokenType::Bang => Some(Compiler::handle_parse_unary),
+            TokenType::String { .. } => Some(Compiler::handle_parse_string),
             _ => None,
         }
     }
@@ -250,6 +274,18 @@ impl Compiler {
             self.emit_constant(vm::Value::Number(value))
         }
         // TODO: handle token error
+    }
+
+    fn handle_parse_string(&mut self) {
+        if let Token {
+            ttype: TokenType::String { literal },
+            ..
+        } = self.previous_token()
+        {
+            self.emit_constant(vm::Value::Object(Rc::new(vm::GcObj::String(
+                literal.clone(),
+            ))))
+        }
     }
 
     fn handle_parse_literal(&mut self) {
@@ -295,12 +331,12 @@ impl Compiler {
             TokenType::GreaterEqual => {
                 self.emit_op(vm::OpCode::Less);
                 self.emit_op(vm::OpCode::Not);
-            },
+            }
             TokenType::Less => self.emit_op(vm::OpCode::Less),
             TokenType::LessEqual => {
                 self.emit_op(vm::OpCode::Greater);
                 self.emit_op(vm::OpCode::Not);
-            },
+            }
             TokenType::Plus => self.emit_op(vm::OpCode::Add),
             TokenType::Minus => self.emit_op(vm::OpCode::Subtract),
             TokenType::Star => self.emit_op(vm::OpCode::Multiply),

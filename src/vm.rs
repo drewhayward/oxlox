@@ -1,8 +1,20 @@
+use std::rc::Rc;
+
+use crate::gc::GarbageCollector;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Nil,
     Number(f64),
     Bool(bool),
+    // Heap-allocated values
+    Object(Rc<GcObj>),
+}
+
+/// Garbage collected object values. Meant to be stored in a Value::Object()
+#[derive(Debug, PartialEq, Clone)]
+pub enum GcObj {
+    String(String),
 }
 
 impl Value {
@@ -11,6 +23,11 @@ impl Value {
             (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
             (Self::Nil, _) => true,
             (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
+            (Self::Object(lhs), Self::Object(rhs)) => match (lhs.as_ref(), rhs.as_ref()) {
+                (GcObj::String(lhs_v), GcObj::String(rhs_v)) => *lhs_v == *rhs_v,
+                _ => false,
+            },
+            // If Value types don't match then they aren't equal.
             _ => false,
         }
     }
@@ -151,12 +168,14 @@ pub enum ErrorKind {
 pub struct VM {
     pub debug: bool,
     stack: Vec<Value>,
+    gc: GarbageCollector,
 }
 
 impl VM {
     pub fn new() -> VM {
         VM {
             stack: Vec::new(),
+            gc: GarbageCollector::new(),
             debug: false,
         }
     }
@@ -190,12 +209,29 @@ impl VM {
                     }
                 }
                 OpCode::Add => {
-                    let rhs = self.stack.pop().expect("Should have an RHS value to add");
-                    let lhs = self.stack.pop().expect("Should have an LHS value to add");
+                    let rhs_value = self.stack.pop().expect("Should have an RHS value to add");
+                    let lhs_value = self.stack.pop().expect("Should have an LHS value to add");
 
-                    match (lhs, rhs) {
+                    match (lhs_value, rhs_value) {
                         (Value::Number(lhs_value), Value::Number(rhs_value)) => {
                             self.stack.push(Value::Number(lhs_value + rhs_value))
+                        }
+                        (Value::Object(lhs_rc), Value::Object(rhs_rc)) => {
+                            match (lhs_rc.as_ref(), rhs_rc.as_ref()) {
+                                (GcObj::String(lhs_value), GcObj::String(rhs_value)) => {
+                                    let new_value = self.gc.register_object(GcObj::String(
+                                        lhs_value.to_owned() + rhs_value,
+                                    ));
+
+                                    self.stack.push(Value::Object(new_value))
+                                }
+                                _ => {
+                                    return Err(RuntimeError::TypeError(format!(
+                                        "Cannot add objects {:?} and {:?}",
+                                        lhs_rc, rhs_rc
+                                    )))
+                                }
+                            }
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
