@@ -1,9 +1,9 @@
 use core::panic;
-use std::rc::Rc;
 
 use crate::{
+    heap::GcHeap,
     scanner::{Token, TokenType},
-    vm,
+    vm::{self, LoxValue},
 };
 
 // TODO: Convert expectations in this module into properly handled errors.
@@ -72,20 +72,22 @@ pub enum CompilationError {
 }
 
 #[derive(Debug)]
-pub struct Compiler {
+pub struct Compiler<'vm> {
+    heap: &'vm mut GcHeap,
     tokens: Vec<Token>,
     position: usize,
     had_error: bool,
     current_chunk: Option<vm::Chunk>,
 }
 
-impl Compiler {
-    pub fn new(tokens: Vec<Token>) -> Compiler {
+impl<'vm> Compiler<'vm> {
+    pub fn new(tokens: Vec<Token>, heap: &'vm mut GcHeap) -> Compiler {
         if tokens.is_empty() {
             panic!("Attempting to parse an empty list of tokens")
         }
 
         Compiler {
+            heap,
             tokens,
             position: 0,
             had_error: false,
@@ -200,12 +202,17 @@ impl Compiler {
 
     fn parse_stmt(&mut self) {
         match self.current_token().ttype {
-            TokenType::Print =>  {}
-            _ => self.error_at(&self.current_token(), "Unexpected token to start statements.")
+            TokenType::Print => {
+                self.parse_expression();
+                self.consume_token(TokenType::Semicolon);
+                self.emit_op(vm::OpCode::Print)
+            }
+            _ => self.error_at(
+                &self.current_token(),
+                "Unexpected token to start statements.",
+            ),
         }
     }
-
-
 
     fn parse_expression(&mut self) {
         self.parse_expr_w_precedence(Precedence::Assignment);
@@ -234,7 +241,7 @@ impl Compiler {
         }
     }
 
-    fn lookup_prefix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler) -> ()> {
+    fn lookup_prefix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
         match ttype {
             TokenType::Nil => Some(Compiler::handle_parse_literal),
             TokenType::True => Some(Compiler::handle_parse_literal),
@@ -248,7 +255,7 @@ impl Compiler {
         }
     }
 
-    fn lookup_infix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler) -> ()> {
+    fn lookup_infix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
         match ttype {
             TokenType::Plus => Some(Compiler::handle_parse_binary),
             TokenType::Minus => Some(Compiler::handle_parse_binary),
@@ -271,7 +278,7 @@ impl Compiler {
             ..
         } = self.previous_token()
         {
-            self.emit_constant(vm::Value::Number(value))
+            self.emit_constant(vm::LoxValue::Number(value))
         }
         // TODO: handle token error
     }
@@ -282,9 +289,10 @@ impl Compiler {
             ..
         } = self.previous_token()
         {
-            self.emit_constant(vm::Value::Object(Rc::new(vm::GcObj::String(
-                literal.clone(),
-            ))))
+            let heap_ref = self
+                .heap
+                .allocate(crate::object::ObjectType::String(literal.clone()));
+            self.emit_constant(vm::LoxValue::Object(heap_ref))
         }
     }
 
@@ -361,7 +369,7 @@ impl Compiler {
         chunk.write(arg, line);
     }
 
-    fn emit_constant(&mut self, value: vm::Value) {
+    fn emit_constant(&mut self, value: vm::LoxValue) {
         let chunk = self.current_chunk().expect("Chunk should be defined.");
         let index = chunk.add_constant(value);
         self.emit_op_and_arg(vm::OpCode::Constant, index)
@@ -381,8 +389,9 @@ mod test {
 
     #[test]
     fn it_emits_chunks() {
+        let mut heap = GcHeap::new();
         let input_tokens: Vec<_> = ttypes_to_tokens(vec![TokenType::Eof]);
-        let mut compiler = Compiler::new(input_tokens);
+        let mut compiler = Compiler::new(input_tokens, &mut heap);
         let chunk = compiler.compile().unwrap();
 
         assert!(chunk.code.len() == 0, "Chunk should be empty")

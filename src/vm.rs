@@ -1,40 +1,49 @@
-use std::rc::Rc;
+use std::fmt;
 
-use crate::gc::GarbageCollector;
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Value {
+use crate::heap::{GcHeap, GcRef};
+use crate::object::{Object, ObjectType};
+
+#[derive(Debug, Clone)]
+pub enum LoxValue {
     Nil,
     Number(f64),
     Bool(bool),
-    // Heap-allocated values
-    Object(Rc<GcObj>),
+    Object(GcRef<Object>),
 }
 
-/// Garbage collected object values. Meant to be stored in a Value::Object()
-#[derive(Debug, PartialEq, Clone)]
-pub enum GcObj {
-    String(String),
+impl LoxValue {
+    fn is_falsey(&self) -> bool {
+        match self {
+            Self::Nil | Self::Bool(false) => true,
+            _ => false,
+        }
+    }
 }
 
-impl Value {
-    fn equal(&self, other: &Self) -> bool {
+impl fmt::Display for LoxValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoxValue::Nil => write!(f, "nil"),
+            LoxValue::Number(number) => write!(f, "{}", number),
+            LoxValue::Bool(value) => write!(f, "{}", value),
+            LoxValue::Object(object) => match &object.value {
+                ObjectType::String(value) => write!(f, "{}", value),
+            },
+        }
+    }
+}
+impl PartialEq for LoxValue {
+    fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
             (Self::Nil, _) => true,
             (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
-            (Self::Object(lhs), Self::Object(rhs)) => match (lhs.as_ref(), rhs.as_ref()) {
-                (GcObj::String(lhs_v), GcObj::String(rhs_v)) => *lhs_v == *rhs_v,
+            (Self::Object(lhs), Self::Object(rhs)) => match (&lhs.value, &rhs.value) {
+                (ObjectType::String(lhs_v), ObjectType::String(rhs_v)) => *lhs_v == *rhs_v,
                 _ => false,
             },
             // If Value types don't match then they aren't equal.
-            _ => false,
-        }
-    }
-
-    fn is_falsey(&self) -> bool {
-        match self {
-            Self::Nil | Self::Bool(false) => true,
             _ => false,
         }
     }
@@ -56,6 +65,7 @@ pub enum OpCode {
     Equal,
     Greater,
     Less,
+    Print,
 }
 
 impl OpCode {
@@ -89,6 +99,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::Equal as u8 => Ok(OpCode::Equal),
             x if x == OpCode::Greater as u8 => Ok(OpCode::Greater),
             x if x == OpCode::Less as u8 => Ok(OpCode::Less),
+            x if x == OpCode::Print as u8 => Ok(OpCode::Print),
             _ => Err(()),
         }
     }
@@ -97,7 +108,7 @@ impl TryFrom<u8> for OpCode {
 #[derive(Debug)]
 pub struct Chunk {
     pub code: Vec<u8>,
-    pub values: Vec<Value>,
+    pub values: Vec<LoxValue>,
     pub line_nums: Vec<u32>,
 }
 
@@ -119,7 +130,7 @@ impl Chunk {
         self.write(op as u8, line_num)
     }
 
-    pub fn add_constant(&mut self, value: Value) -> u8 {
+    pub fn add_constant(&mut self, value: LoxValue) -> u8 {
         if self.values.len() >= <u8 as Into<usize>>::into(std::u8::MAX) + 1 {
             panic!("Attempted to add more than 256 constants to a code chunk")
         }
@@ -128,7 +139,7 @@ impl Chunk {
         (self.values.len() - 1) as u8
     }
 
-    pub fn read_constant(&self, index: u8) -> Value {
+    pub fn read_constant(&self, index: u8) -> LoxValue {
         return self.values[index as usize].clone();
     }
 
@@ -167,15 +178,15 @@ pub enum ErrorKind {
 #[derive(Debug)]
 pub struct VM {
     pub debug: bool,
-    stack: Vec<Value>,
-    gc: GarbageCollector,
+    pub heap: GcHeap,
+    stack: Vec<LoxValue>,
 }
 
 impl VM {
     pub fn new() -> VM {
         VM {
             stack: Vec::new(),
-            gc: GarbageCollector::new(),
+            heap: GcHeap::new(),
             debug: false,
         }
     }
@@ -200,8 +211,8 @@ impl VM {
                 }
                 OpCode::Negate => {
                     let value = self.stack.pop().expect("Stack should have a value.");
-                    if let Value::Number(num_value) = value {
-                        self.stack.push(Value::Number(-num_value));
+                    if let LoxValue::Number(num_value) = value {
+                        self.stack.push(LoxValue::Number(-num_value));
                     } else {
                         return Err(RuntimeError::TypeError(
                             "Operand should be a number.".to_string(),
@@ -213,17 +224,17 @@ impl VM {
                     let lhs_value = self.stack.pop().expect("Should have an LHS value to add");
 
                     match (lhs_value, rhs_value) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Number(lhs_value + rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Number(lhs_value + rhs_value))
                         }
-                        (Value::Object(lhs_rc), Value::Object(rhs_rc)) => {
-                            match (lhs_rc.as_ref(), rhs_rc.as_ref()) {
-                                (GcObj::String(lhs_value), GcObj::String(rhs_value)) => {
-                                    let new_value = self.gc.register_object(GcObj::String(
-                                        lhs_value.to_owned() + rhs_value,
+                        (LoxValue::Object(lhs_rc), LoxValue::Object(rhs_rc)) => {
+                            match (&lhs_rc.value, &rhs_rc.value) {
+                                (ObjectType::String(lhs_value), ObjectType::String(rhs_value)) => {
+                                    let new_value = self.heap.allocate(ObjectType::String(
+                                        lhs_value.clone() + rhs_value,
                                     ));
 
-                                    self.stack.push(Value::Object(new_value))
+                                    self.stack.push(LoxValue::Object(new_value))
                                 }
                                 _ => {
                                     return Err(RuntimeError::TypeError(format!(
@@ -251,8 +262,8 @@ impl VM {
                         .expect("Should have an LHS value to subtract");
 
                     match (lhs, rhs) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Number(lhs_value - rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Number(lhs_value - rhs_value))
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
@@ -271,8 +282,8 @@ impl VM {
                         .pop()
                         .expect("Should have an LHS value to multiply");
                     match (lhs, rhs) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Number(lhs_value * rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Number(lhs_value * rhs_value))
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
@@ -291,8 +302,8 @@ impl VM {
                         .pop()
                         .expect("Should have an LHS value to divide");
                     match (lhs, rhs) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Number(lhs_value / rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Number(lhs_value / rhs_value))
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
@@ -301,11 +312,11 @@ impl VM {
                         }
                     }
                 }
-                OpCode::Nil => self.stack.push(Value::Nil),
-                OpCode::True => self.stack.push(Value::Bool(true)),
-                OpCode::False => self.stack.push(Value::Bool(false)),
+                OpCode::Nil => self.stack.push(LoxValue::Nil),
+                OpCode::True => self.stack.push(LoxValue::Bool(true)),
+                OpCode::False => self.stack.push(LoxValue::Bool(false)),
                 OpCode::Not => match self.stack.pop() {
-                    Some(value) => self.stack.push(Value::Bool(value.is_falsey())),
+                    Some(value) => self.stack.push(LoxValue::Bool(value.is_falsey())),
                     None => panic!("Value should exist"),
                 },
                 OpCode::Equal => {
@@ -317,7 +328,7 @@ impl VM {
                         .stack
                         .pop()
                         .expect("Should have an LHS value to divide");
-                    self.stack.push(Value::Bool(lhs.equal(&rhs)));
+                    self.stack.push(LoxValue::Bool(lhs == rhs));
                 }
                 OpCode::Greater => {
                     let rhs = self
@@ -330,8 +341,8 @@ impl VM {
                         .expect("Should have an LHS value to divide");
 
                     match (lhs, rhs) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Bool(lhs_value > rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Bool(lhs_value > rhs_value))
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
@@ -351,8 +362,8 @@ impl VM {
                         .expect("Should have an LHS value to divide");
 
                     match (lhs, rhs) {
-                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
-                            self.stack.push(Value::Bool(lhs_value < rhs_value))
+                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
+                            self.stack.push(LoxValue::Bool(lhs_value < rhs_value))
                         }
                         _ => {
                             return Err(RuntimeError::TypeError(
@@ -360,6 +371,10 @@ impl VM {
                             ))
                         }
                     }
+                }
+                OpCode::Print => {
+                    let value = self.stack.pop().expect("should have a value to print");
+                    println!("{value}")
                 }
             }
         }
@@ -393,8 +408,8 @@ mod test {
     fn chunk_reads_its_writes() {
         let mut c = Chunk::new();
         let value = 42.0;
-        let index = c.add_constant(Value::Number(value));
-        assert_eq!(Value::Number(value), c.read_constant(index));
+        let index = c.add_constant(LoxValue::Number(value));
+        assert_eq!(LoxValue::Number(value), c.read_constant(index));
     }
 
     #[test]
@@ -404,7 +419,7 @@ mod test {
         let value = 42.0;
 
         for _ in 0..=255 + 1 {
-            let _ = c.add_constant(Value::Number(value));
+            let _ = c.add_constant(LoxValue::Number(value));
         }
     }
 }

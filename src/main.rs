@@ -10,6 +10,7 @@ oxlox <lox_file>
 }
 
 fn run(args: Vec<String>) {
+    let mut vm = oxlox::vm::VM::new();
     let filename = args.get(1).expect("Filename expected.");
 
     let mut file = fs::File::open(filename).expect("Failed to open lox file.");
@@ -22,12 +23,11 @@ fn run(args: Vec<String>) {
 
     println!("{:?}", tokens);
 
-    let mut compiler = oxlox::compiler::Compiler::new(tokens);
+    let mut compiler = oxlox::compiler::Compiler::new(tokens, &mut vm.heap);
     let code_chunk = compiler.compile().unwrap();
 
     code_chunk.disassemble("Complied");
 
-    let mut vm = oxlox::vm::VM::new();
     let _ = vm.interpret(&code_chunk);
 }
 
