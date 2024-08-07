@@ -3,7 +3,7 @@ use core::panic;
 use crate::{
     heap::GcHeap,
     scanner::{Token, TokenType},
-    vm::{self, LoxValue},
+    vm,
 };
 
 // TODO: Convert expectations in this module into properly handled errors.
@@ -100,7 +100,7 @@ impl<'vm> Compiler<'vm> {
         self.current_chunk = Some(vm::Chunk::new());
 
         while !self.match_token(TokenType::Eof) {
-            self.parse_expression();
+            self.parse_declaration();
             // TODO: How to guarantee that we are actually making progress through the tokens?
         }
 
@@ -184,10 +184,6 @@ impl<'vm> Compiler<'vm> {
             expected_ttype
         );
 
-        self.error_at(
-            &self.current_token(),
-            format!("Unexpected token: {:?}", current_ttype).as_str(),
-        );
         self.advance_token();
     }
 
@@ -203,14 +199,16 @@ impl<'vm> Compiler<'vm> {
     fn parse_stmt(&mut self) {
         match self.current_token().ttype {
             TokenType::Print => {
+                self.advance_token();
                 self.parse_expression();
                 self.consume_token(TokenType::Semicolon);
                 self.emit_op(vm::OpCode::Print)
             }
-            _ => self.error_at(
-                &self.current_token(),
-                "Unexpected token to start statements.",
-            ),
+            // Expr statement
+            _ => {
+                self.parse_expression();
+                self.consume_token(TokenType::Semicolon);
+            }
         }
     }
 
@@ -220,7 +218,7 @@ impl<'vm> Compiler<'vm> {
 
     /// Parse an expression of a specific precedence level or higher.
     fn parse_expr_w_precedence(&mut self, prec: Precedence) {
-        self.advance_token();
+        let a = self.advance_token();
 
         // Check for prefix rule
         let previous_ttype = self.previous_token().ttype;

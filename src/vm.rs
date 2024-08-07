@@ -1,6 +1,5 @@
 use std::fmt;
 
-
 use crate::heap::{GcHeap, GcRef};
 use crate::object::{Object, ObjectType};
 
@@ -40,8 +39,8 @@ impl PartialEq for LoxValue {
             (Self::Nil, _) => true,
             (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
             (Self::Object(lhs), Self::Object(rhs)) => match (&lhs.value, &rhs.value) {
-                (ObjectType::String(lhs_v), ObjectType::String(rhs_v)) => *lhs_v == *rhs_v,
-                _ => false,
+                // If they are strings we can compare their pointers since all strings are interned
+                (ObjectType::String(_), ObjectType::String(_)) => lhs.ptr_equal(rhs),
             },
             // If Value types don't match then they aren't equal.
             _ => false,
@@ -235,13 +234,12 @@ impl VM {
                                     ));
 
                                     self.stack.push(LoxValue::Object(new_value))
-                                }
-                                _ => {
-                                    return Err(RuntimeError::TypeError(format!(
-                                        "Cannot add objects {:?} and {:?}",
-                                        lhs_rc, rhs_rc
-                                    )))
-                                }
+                                } //_ => {
+                                  //    return Err(RuntimeError::TypeError(format!(
+                                  //        "Cannot add objects {:?} and {:?}",
+                                  //        lhs_rc, rhs_rc
+                                  //    )))
+                                  //}
                             }
                         }
                         _ => {
