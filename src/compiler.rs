@@ -182,8 +182,9 @@ impl<'vm> Compiler<'vm> {
         let current_ttype = self.current_token().ttype;
         assert!(
             current_ttype.is_variant_eq(&expected_ttype),
-            "Expected a token of type {:?}",
-            expected_ttype
+            "Expected a token of type {:?} but found {:?}",
+            expected_ttype,
+            current_ttype
         );
 
         self.advance_token();
@@ -215,8 +216,7 @@ impl<'vm> Compiler<'vm> {
         };
 
         self.emit_op_and_arg(vm::OpCode::DefineGlobal, name_index);
-
-        self.consume_token(TokenType::Semicolon)
+        self.consume_token(TokenType::Semicolon);
     }
 
     /// Returns the index to the variable name constant
@@ -264,7 +264,10 @@ impl<'vm> Compiler<'vm> {
             )
             .as_ref(),
         );
-        prefix_handler(self);
+
+        let can_assign = prec <= Precedence::Assignment;
+        dbg!(can_assign);
+        prefix_handler(self, can_assign);
 
         // Check for infix rules while the observed prec is the same or higher
         while prec <= Precedence::from_token(&self.current_token().ttype) {
@@ -278,7 +281,12 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn lookup_prefix_handler(&self, ttype: &TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
+    /* Pratt-Style Parsing table for Expressions */
+
+    fn lookup_prefix_handler(
+        &self,
+        ttype: &TokenType,
+    ) -> Option<fn(&mut Compiler<'vm>, bool) -> ()> {
         match ttype {
             TokenType::Nil => Some(Compiler::handle_parse_literal),
             TokenType::True => Some(Compiler::handle_parse_literal),
@@ -288,7 +296,7 @@ impl<'vm> Compiler<'vm> {
             TokenType::Minus => Some(Compiler::handle_parse_unary),
             TokenType::Bang => Some(Compiler::handle_parse_unary),
             TokenType::String { .. } => Some(Compiler::handle_parse_string),
-            TokenType::Identifier { .. } => Some(Compiler::handle_parse_identifier),
+            TokenType::Identifier { .. } => Some(Compiler::handle_parse_variable),
             _ => None,
         }
     }
@@ -310,7 +318,7 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn handle_parse_number(&mut self) {
+    fn handle_parse_number(&mut self, _can_assign: bool) {
         if let Token {
             ttype: TokenType::Number(value),
             ..
@@ -321,7 +329,7 @@ impl<'vm> Compiler<'vm> {
         // TODO: handle token error
     }
 
-    fn handle_parse_string(&mut self) {
+    fn handle_parse_string(&mut self, _can_assign: bool) {
         if let Token {
             ttype: TokenType::String { literal },
             ..
@@ -332,18 +340,25 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn handle_parse_identifier(&mut self) {
+    fn handle_parse_variable(&mut self, can_assign: bool) {
         if let Token {
             ttype: TokenType::Identifier { name },
             ..
         } = self.previous_token()
         {
             let name_index = self.make_identifier_constant(name);
-            self.emit_op_and_arg(vm::OpCode::GetGlobal, name_index);
+
+            // Depending on the next token we will change get vs set
+            if can_assign && self.match_token(TokenType::Equal) {
+                self.parse_expression();
+                self.emit_op_and_arg(vm::OpCode::SetGlobal, name_index);
+            } else {
+                self.emit_op_and_arg(vm::OpCode::GetGlobal, name_index);
+            }
         }
     }
 
-    fn handle_parse_literal(&mut self) {
+    fn handle_parse_literal(&mut self, _can_assign: bool) {
         match self.previous_token().ttype {
             TokenType::Nil => self.emit_op(vm::OpCode::Nil),
             TokenType::True => self.emit_op(vm::OpCode::True),
@@ -352,12 +367,13 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn handle_parse_grouping(&mut self) {
+    fn handle_parse_grouping(&mut self, _can_assign: bool) {
+        // Reset the precedence since the parens ensure unambiguous parsing
         self.parse_expression();
         self.consume_token(TokenType::RightParen);
     }
 
-    fn handle_parse_unary(&mut self) {
+    fn handle_parse_unary(&mut self, _can_assign: bool) {
         let operator_type = self.previous_token().ttype;
 
         // Parse the unary operand

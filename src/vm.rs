@@ -89,6 +89,7 @@ pub enum OpCode {
     Print,
     DefineGlobal,
     GetGlobal,
+    SetGlobal,
 }
 
 impl OpCode {
@@ -97,6 +98,7 @@ impl OpCode {
         match *self {
             Self::Constant => 1,
             Self::GetGlobal => 1,
+            Self::SetGlobal => 1,
             Self::DefineGlobal => 1,
             _ => 0,
         }
@@ -127,6 +129,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::Print as u8 => Ok(OpCode::Print),
             x if x == OpCode::DefineGlobal as u8 => Ok(OpCode::DefineGlobal),
             x if x == OpCode::GetGlobal as u8 => Ok(OpCode::GetGlobal),
+            x if x == OpCode::SetGlobal as u8 => Ok(OpCode::SetGlobal),
             _ => Err(()),
         }
     }
@@ -431,6 +434,13 @@ impl VM {
                     let value = self.globals.get(&name).unwrap();
 
                     self.stack.push(value.clone())
+                }
+                OpCode::SetGlobal => {
+                    let name_index = *ip.next().expect("Expected var name index following constant op.");
+                    let name: String = chunk.read_constant(name_index).try_into().unwrap();
+
+                    let value = self.stack.pop().expect("Value should exist to set.");
+                    self.globals.insert(name, value);
                 }
             }
         }
