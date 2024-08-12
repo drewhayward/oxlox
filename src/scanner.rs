@@ -50,6 +50,12 @@ pub enum TokenType {
     Eof,
 }
 
+impl TokenType {
+    pub fn is_variant_eq(&self, other: &TokenType) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Token {
     pub ttype: TokenType,

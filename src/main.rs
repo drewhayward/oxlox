@@ -28,7 +28,7 @@ fn run(args: Vec<String>) {
 
     code_chunk.disassemble("Complied");
 
-    let _ = vm.interpret(&code_chunk);
+    let _ = vm.interpret(&code_chunk).expect("Runs without problems");
 }
 
 fn main() {

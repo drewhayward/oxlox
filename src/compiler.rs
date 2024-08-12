@@ -1,5 +1,6 @@
 use core::panic;
 
+use crate::object::ObjectType;
 use crate::{
     heap::GcHeap,
     scanner::{Token, TokenType},
@@ -7,6 +8,7 @@ use crate::{
 };
 
 // TODO: Convert expectations in this module into properly handled errors.
+// Include error sycronization at statement-like points.
 
 #[derive(Debug, PartialEq, PartialOrd)]
 enum Precedence {
@@ -76,7 +78,7 @@ pub struct Compiler<'vm> {
     heap: &'vm mut GcHeap,
     tokens: Vec<Token>,
     position: usize,
-    had_error: bool,
+    _had_error: bool,
     current_chunk: Option<vm::Chunk>,
 }
 
@@ -90,7 +92,7 @@ impl<'vm> Compiler<'vm> {
             heap,
             tokens,
             position: 0,
-            had_error: false,
+            _had_error: false,
             current_chunk: None,
         }
     }
@@ -121,7 +123,7 @@ impl<'vm> Compiler<'vm> {
         self.current_chunk.as_mut()
     }
 
-    fn error_at(&mut self, token: &Token, message: &str) {
+    fn _error_at(&mut self, token: &Token, message: &str) {
         eprint!("[line {}] Error", token.line);
         match token.ttype {
             TokenType::Eof => eprint!(" at end."),
@@ -130,7 +132,7 @@ impl<'vm> Compiler<'vm> {
         }
 
         eprintln!("{}", message);
-        self.had_error = true;
+        self._had_error = true;
     }
 
     /* Parsing Methods
@@ -165,7 +167,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn match_token(&mut self, expected_ttype: TokenType) -> bool {
-        if self.current_token().ttype == expected_ttype {
+        if self.current_token().ttype.is_variant_eq(&expected_ttype) {
             self.advance_token();
             true
         } else {
@@ -179,8 +181,8 @@ impl<'vm> Compiler<'vm> {
         // TODO: Handle error cases gracefully
         let current_ttype = self.current_token().ttype;
         assert!(
-            current_ttype == expected_ttype,
-            "Expected a token of {:?}",
+            current_ttype.is_variant_eq(&expected_ttype),
+            "Expected a token of type {:?}",
             expected_ttype
         );
 
@@ -193,7 +195,40 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_declaration(&mut self) {
-        self.parse_stmt();
+        match self.current_token().ttype {
+            TokenType::Var => {
+                self.advance_token();
+                self.parse_variable_decl();
+            }
+            _ => self.parse_stmt(),
+        }
+    }
+
+    fn parse_variable_decl(&mut self) {
+        let name_index = self.parse_variable();
+
+        // Emit the variable declaration value
+        if self.match_token(TokenType::Equal) {
+            self.parse_expression();
+        } else {
+            self.emit_op(vm::OpCode::Nil);
+        };
+
+        self.emit_op_and_arg(vm::OpCode::DefineGlobal, name_index);
+
+        self.consume_token(TokenType::Semicolon)
+    }
+
+    /// Returns the index to the variable name constant
+    fn parse_variable(&mut self) -> u8 {
+        self.consume_token(TokenType::Identifier {
+            name: String::default(),
+        });
+
+        match self.previous_token().ttype {
+            TokenType::Identifier { name } => self.make_identifier_constant(name),
+            _ => unreachable!("Previous must be an Identifier token"),
+        }
     }
 
     fn parse_stmt(&mut self) {
@@ -218,13 +253,17 @@ impl<'vm> Compiler<'vm> {
 
     /// Parse an expression of a specific precedence level or higher.
     fn parse_expr_w_precedence(&mut self, prec: Precedence) {
-        let a = self.advance_token();
+        self.advance_token();
 
         // Check for prefix rule
         let previous_ttype = self.previous_token().ttype;
-        let prefix_handler = self
-            .lookup_prefix_handler(previous_ttype)
-            .expect("There should be a prefix rule");
+        let prefix_handler = self.lookup_prefix_handler(&previous_ttype).expect(
+            format!(
+                "There should be a prefix rule for token type {:?}",
+                &previous_ttype
+            )
+            .as_ref(),
+        );
         prefix_handler(self);
 
         // Check for infix rules while the observed prec is the same or higher
@@ -239,7 +278,7 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn lookup_prefix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
+    fn lookup_prefix_handler(&self, ttype: &TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
         match ttype {
             TokenType::Nil => Some(Compiler::handle_parse_literal),
             TokenType::True => Some(Compiler::handle_parse_literal),
@@ -249,6 +288,7 @@ impl<'vm> Compiler<'vm> {
             TokenType::Minus => Some(Compiler::handle_parse_unary),
             TokenType::Bang => Some(Compiler::handle_parse_unary),
             TokenType::String { .. } => Some(Compiler::handle_parse_string),
+            TokenType::Identifier { .. } => Some(Compiler::handle_parse_identifier),
             _ => None,
         }
     }
@@ -287,10 +327,19 @@ impl<'vm> Compiler<'vm> {
             ..
         } = self.previous_token()
         {
-            let heap_ref = self
-                .heap
-                .allocate(crate::object::ObjectType::String(literal.clone()));
+            let heap_ref = self.heap.allocate(ObjectType::String(literal.clone()));
             self.emit_constant(vm::LoxValue::Object(heap_ref))
+        }
+    }
+
+    fn handle_parse_identifier(&mut self) {
+        if let Token {
+            ttype: TokenType::Identifier { name },
+            ..
+        } = self.previous_token()
+        {
+            let name_index = self.make_identifier_constant(name);
+            self.emit_op_and_arg(vm::OpCode::GetGlobal, name_index);
         }
     }
 
@@ -349,6 +398,16 @@ impl<'vm> Compiler<'vm> {
             TokenType::Slash => self.emit_op(vm::OpCode::Divide),
             _ => unreachable!(),
         }
+    }
+
+    fn make_identifier_constant(&mut self, name: String) -> u8 {
+        let heap_ref = self.heap.allocate(ObjectType::String(name.clone()));
+        let lox_value = vm::LoxValue::Object(heap_ref);
+
+        let chunk = self.current_chunk().unwrap();
+        let name_index = chunk.add_constant(lox_value);
+
+        name_index
     }
 
     /* Byte code emitters */

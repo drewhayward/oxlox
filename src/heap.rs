@@ -19,6 +19,18 @@ impl<T> GcRef<T> {
     }
 }
 
+impl GcRef<Object> {
+    /// Obtain a ref to the underlying GC object
+    pub fn as_obj_ref(&self) -> &ObjectType {
+        &self.value
+    }
+
+    /// Obtain a mutable ref to the underlying GC object
+    pub fn as_obj_mut(&mut self) -> &mut ObjectType {
+        &mut self.value
+    }
+}
+
 impl<T> Clone for GcRef<T> {
     fn clone(&self) -> Self {
         GcRef { ptr: self.ptr }

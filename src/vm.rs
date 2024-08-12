@@ -1,3 +1,5 @@
+use core::panic;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::heap::{GcHeap, GcRef};
@@ -16,6 +18,26 @@ impl LoxValue {
         match self {
             Self::Nil | Self::Bool(false) => true,
             _ => false,
+        }
+    }
+
+    /// Helper function to access a lox value as an object. Returns None if LoxValue is not an
+    /// object
+    fn as_obj_type(&self) -> Option<&ObjectType> {
+        match self {
+            LoxValue::Object(obj) => Some(obj.as_obj_ref()),
+            _ => None,
+        }
+    }
+}
+
+// Not sure how gross this is but I find myself doing this conversion a lot
+impl TryFrom<LoxValue> for String {
+    type Error = ();
+
+    fn try_from(value: LoxValue) -> Result<Self, Self::Error> {
+        match value.as_obj_type().ok_or(())? {
+            ObjectType::String(value) => Ok(value.to_owned())
         }
     }
 }
@@ -65,6 +87,8 @@ pub enum OpCode {
     Greater,
     Less,
     Print,
+    DefineGlobal,
+    GetGlobal,
 }
 
 impl OpCode {
@@ -72,6 +96,8 @@ impl OpCode {
     fn arity(&self) -> i32 {
         match *self {
             Self::Constant => 1,
+            Self::GetGlobal => 1,
+            Self::DefineGlobal => 1,
             _ => 0,
         }
     }
@@ -99,6 +125,8 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::Greater as u8 => Ok(OpCode::Greater),
             x if x == OpCode::Less as u8 => Ok(OpCode::Less),
             x if x == OpCode::Print as u8 => Ok(OpCode::Print),
+            x if x == OpCode::DefineGlobal as u8 => Ok(OpCode::DefineGlobal),
+            x if x == OpCode::GetGlobal as u8 => Ok(OpCode::GetGlobal),
             _ => Err(()),
         }
     }
@@ -179,14 +207,16 @@ pub struct VM {
     pub debug: bool,
     pub heap: GcHeap,
     stack: Vec<LoxValue>,
+    globals: HashMap<String, LoxValue>,
 }
 
 impl VM {
     pub fn new() -> VM {
         VM {
-            stack: Vec::new(),
             heap: GcHeap::new(),
             debug: false,
+            stack: Vec::new(),
+            globals: HashMap::new(),
         }
     }
 
@@ -227,7 +257,7 @@ impl VM {
                             self.stack.push(LoxValue::Number(lhs_value + rhs_value))
                         }
                         (LoxValue::Object(lhs_rc), LoxValue::Object(rhs_rc)) => {
-                            match (&lhs_rc.value, &rhs_rc.value) {
+                            match (lhs_rc.as_obj_ref(), rhs_rc.as_obj_ref()) {
                                 (ObjectType::String(lhs_value), ObjectType::String(rhs_value)) => {
                                     let new_value = self.heap.allocate(ObjectType::String(
                                         lhs_value.clone() + rhs_value,
@@ -374,11 +404,40 @@ impl VM {
                     let value = self.stack.pop().expect("should have a value to print");
                     println!("{value}")
                 }
+                OpCode::DefineGlobal => {
+                    let name_index = *ip.next().expect("Expected index following constant op.");
+                    let name_value = chunk.read_constant(name_index);
+                    let global_value = self
+                        .stack
+                        .pop()
+                        .expect("Should have a value on the stack for global definition");
+
+
+                    match name_value
+                        .as_obj_type()
+                        .expect("Stack value should be an object")
+                    {
+                        ObjectType::String(value) => {
+                            self.globals.insert(value.to_owned(), global_value);
+                        }
+                        _ => unreachable!(
+                            "Lox values should be defined with an index to a string constant."
+                        ),
+                    };
+                }
+                OpCode::GetGlobal => {
+                    let name_index = *ip.next().expect("Expected var name index following constant op.");
+                    let name: String = chunk.read_constant(name_index).try_into().unwrap();
+                    let value = self.globals.get(&name).unwrap();
+
+                    self.stack.push(value.clone())
+                }
             }
         }
 
         Err(RuntimeError::NoReturn)
     }
+    
 
     pub fn reset(&mut self) {
         self.stack.clear()
