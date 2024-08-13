@@ -70,7 +70,7 @@ impl Precedence {
 #[derive(Debug)]
 pub enum CompilationError {
     /// The compiler did not expect to see a token of the given type in its current state.
-    UnexpectedToken { ttype: TokenType, msg: String },
+    UnexpectedToken { token: Token, msg: String },
     /// Expected the file to have more tokens but none were present.
     ExhaustedTokens,
 }
@@ -201,7 +201,7 @@ impl<'vm> Compiler<'vm> {
         let current_ttype = self.current_token().ttype;
         if !current_ttype.is_variant_eq(&expected_ttype) {
             return Err(CompilationError::UnexpectedToken {
-                ttype: current_ttype.clone(),
+                token: self.current_token(),
                 msg: format!(
                     "Expected a token of type {:?} but found {:?}",
                     expected_ttype, current_ttype
@@ -219,8 +219,8 @@ impl<'vm> Compiler<'vm> {
         self.position < self.tokens.len() && self.current_token().ttype != TokenType::Eof
     }
 
-    /// Reset the parser to a good state from an error state by advancing to the next statement.
-    /// Semicolons and statement starting terms are used to determine when to stop advancing.
+    /// Reset the parser to a good state from an error state by advancing to the next statement. Semicolons and statement
+    /// starting terms are used to determine when to stop advancing.
     fn sychronize(&mut self) {
         self._had_error = false;
 
@@ -260,7 +260,7 @@ impl<'vm> Compiler<'vm> {
 
         // Emit the variable declaration value
         if self.match_token(TokenType::Equal) {
-            self.parse_expression();
+            self.parse_expression()?;
         } else {
             self.emit_op(vm::OpCode::Nil);
         };
@@ -320,7 +320,7 @@ impl<'vm> Compiler<'vm> {
         );
 
         let can_assign = prec <= Precedence::Assignment;
-        prefix_handler(self, can_assign);
+        prefix_handler(self, can_assign)?;
 
         // Check for infix rules while the observed prec is the same or higher
         while prec <= Precedence::from_token(&self.current_token().ttype) {
@@ -330,7 +330,7 @@ impl<'vm> Compiler<'vm> {
                 .lookup_infix_handler(previous_ttype)
                 .expect("Infix rule should exist if the precedence is higher for this token.");
 
-            infix_handler(self);
+            infix_handler(self)?;
         }
 
         Ok(())
@@ -341,7 +341,7 @@ impl<'vm> Compiler<'vm> {
     fn lookup_prefix_handler(
         &self,
         ttype: &TokenType,
-    ) -> Option<fn(&mut Compiler<'vm>, bool) -> ()> {
+    ) -> Option<fn(&mut Compiler<'vm>, bool) -> Result<(), CompilationError>> {
         match ttype {
             TokenType::Nil => Some(Compiler::handle_parse_literal),
             TokenType::True => Some(Compiler::handle_parse_literal),
@@ -356,7 +356,10 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn lookup_infix_handler(&self, ttype: TokenType) -> Option<fn(&mut Compiler<'vm>) -> ()> {
+    fn lookup_infix_handler(
+        &self,
+        ttype: TokenType,
+    ) -> Option<fn(&mut Compiler<'vm>) -> Result<(), CompilationError>> {
         match ttype {
             TokenType::Plus => Some(Compiler::handle_parse_binary),
             TokenType::Minus => Some(Compiler::handle_parse_binary),
@@ -373,29 +376,35 @@ impl<'vm> Compiler<'vm> {
         }
     }
 
-    fn handle_parse_number(&mut self, _can_assign: bool) {
+    fn handle_parse_number(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         if let Token {
             ttype: TokenType::Number(value),
             ..
         } = self.previous_token()
         {
-            self.emit_constant(vm::LoxValue::Number(value))
+            self.emit_constant(vm::LoxValue::Number(value));
+            Ok(())
+        } else {
+            unreachable!("handler should be called when number literal token is previous.")
         }
-        // TODO: handle token error
     }
 
-    fn handle_parse_string(&mut self, _can_assign: bool) {
+    fn handle_parse_string(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         if let Token {
             ttype: TokenType::String { literal },
             ..
         } = self.previous_token()
         {
             let heap_ref = self.heap.allocate(ObjectType::String(literal.clone()));
-            self.emit_constant(vm::LoxValue::Object(heap_ref))
+            self.emit_constant(vm::LoxValue::Object(heap_ref));
+
+            Ok(())
+        } else {
+            unreachable!("handler should be called when string token is previous.")
         }
     }
 
-    fn handle_parse_variable(&mut self, can_assign: bool) {
+    fn handle_parse_variable(&mut self, can_assign: bool) -> Result<(), CompilationError> {
         if let Token {
             ttype: TokenType::Identifier { name },
             ..
@@ -405,47 +414,62 @@ impl<'vm> Compiler<'vm> {
 
             // Depending on the next token we will change get vs set
             if can_assign && self.match_token(TokenType::Equal) {
-                self.parse_expression();
+                self.parse_expression()?;
                 self.emit_op_and_arg(vm::OpCode::SetGlobal, name_index);
             } else {
                 self.emit_op_and_arg(vm::OpCode::GetGlobal, name_index);
             }
+
+            return Ok(());
         }
+
+        unreachable!("Function must always be called when an identifier has been consumed.")
     }
 
-    fn handle_parse_literal(&mut self, _can_assign: bool) {
+    fn handle_parse_literal(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         match self.previous_token().ttype {
             TokenType::Nil => self.emit_op(vm::OpCode::Nil),
             TokenType::True => self.emit_op(vm::OpCode::True),
             TokenType::False => self.emit_op(vm::OpCode::False),
-            _ => panic!("Unexpected token type {:?}", self.previous_token().ttype),
+            _ => {
+                return Err(CompilationError::UnexpectedToken {
+                    token: self.previous_token(),
+                    msg: "Unexpected token for literal".to_string(),
+                });
+            }
         }
+
+        Ok(())
     }
 
-    fn handle_parse_grouping(&mut self, _can_assign: bool) {
+    fn handle_parse_grouping(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         // Reset the precedence since the parens ensure unambiguous parsing
-        self.parse_expression();
-        self.consume_token(TokenType::RightParen);
+        self.parse_expression()?;
+        self.consume_token(TokenType::RightParen)?;
+
+        Ok(())
     }
 
-    fn handle_parse_unary(&mut self, _can_assign: bool) {
+    fn handle_parse_unary(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         let operator_type = self.previous_token().ttype;
 
         // Parse the unary operand
-        self.parse_expr_w_precedence(Precedence::Unary);
+        self.parse_expr_w_precedence(Precedence::Unary)?;
 
         match operator_type {
             TokenType::Minus => self.emit_op(vm::OpCode::Negate),
             TokenType::Bang => self.emit_op(vm::OpCode::Not),
             _ => unreachable!(),
         };
+
+        Ok(())
     }
 
-    fn handle_parse_binary(&mut self) {
+    fn handle_parse_binary(&mut self) -> Result<(), CompilationError> {
         let op_type = self.previous_token().ttype;
         let op_precedence = Precedence::from_token(&op_type);
 
-        self.parse_expr_w_precedence(op_precedence.successor());
+        self.parse_expr_w_precedence(op_precedence.successor())?;
 
         match op_type {
             TokenType::BangEqual => {
@@ -469,6 +493,8 @@ impl<'vm> Compiler<'vm> {
             TokenType::Slash => self.emit_op(vm::OpCode::Divide),
             _ => unreachable!(),
         }
+
+        Ok(())
     }
 
     fn make_identifier_constant(&mut self, name: String) -> u8 {
