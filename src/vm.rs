@@ -37,7 +37,7 @@ impl TryFrom<LoxValue> for String {
 
     fn try_from(value: LoxValue) -> Result<Self, Self::Error> {
         match value.as_obj_type().ok_or(())? {
-            ObjectType::String(value) => Ok(value.to_owned())
+            ObjectType::String(value) => Ok(value.to_owned()),
         }
     }
 }
@@ -90,6 +90,10 @@ pub enum OpCode {
     DefineGlobal,
     GetGlobal,
     SetGlobal,
+    /// Discard a value off the stack
+    Pop,
+    GetLocal,
+    SetLocal,
 }
 
 impl OpCode {
@@ -99,6 +103,8 @@ impl OpCode {
             Self::Constant => 1,
             Self::GetGlobal => 1,
             Self::SetGlobal => 1,
+            Self::GetLocal => 1,
+            Self::SetLocal => 1,
             Self::DefineGlobal => 1,
             _ => 0,
         }
@@ -130,6 +136,9 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::DefineGlobal as u8 => Ok(OpCode::DefineGlobal),
             x if x == OpCode::GetGlobal as u8 => Ok(OpCode::GetGlobal),
             x if x == OpCode::SetGlobal as u8 => Ok(OpCode::SetGlobal),
+            x if x == OpCode::GetLocal as u8 => Ok(OpCode::GetLocal),
+            x if x == OpCode::SetLocal as u8 => Ok(OpCode::SetLocal),
+            x if x == OpCode::Pop as u8 => Ok(OpCode::Pop),
             _ => Err(()),
         }
     }
@@ -415,7 +424,6 @@ impl VM {
                         .pop()
                         .expect("Should have a value on the stack for global definition");
 
-
                     match name_value
                         .as_obj_type()
                         .expect("Stack value should be an object")
@@ -429,25 +437,54 @@ impl VM {
                     };
                 }
                 OpCode::GetGlobal => {
-                    let name_index = *ip.next().expect("Expected var name index following constant op.");
+                    let name_index = *ip
+                        .next()
+                        .expect("Expected var name index following constant op.");
                     let name: String = chunk.read_constant(name_index).try_into().unwrap();
                     let value = self.globals.get(&name).unwrap();
 
                     self.stack.push(value.clone())
                 }
                 OpCode::SetGlobal => {
-                    let name_index = *ip.next().expect("Expected var name index following constant op.");
+                    let name_index = *ip
+                        .next()
+                        .expect("Expected var name index following constant op.");
                     let name: String = chunk.read_constant(name_index).try_into().unwrap();
 
                     let value = self.stack.pop().expect("Value should exist to set.");
                     self.globals.insert(name, value);
+                }
+                OpCode::Pop => {
+                    let _ = self.stack.pop();
+                }
+                OpCode::GetLocal => {
+                    let stack_slot = *ip.next().expect("Stack slot exists");
+                    self.stack.push(
+                        self.stack
+                            .get(stack_slot as usize)
+                            .expect("Local variable exists on the stack.")
+                            .clone(),
+                    )
+                }
+                OpCode::SetLocal => {
+                    let stack_slot = *ip.next().expect("Stack slot exists");
+                    let new_value = self
+                        .stack
+                        .last()
+                        .expect("New variable value exists on the stack.")
+                        .clone();
+                    let variable_ref = self
+                        .stack
+                        .get_mut(stack_slot as usize)
+                        .expect("local variable exists");
+
+                    *variable_ref = new_value;
                 }
             }
         }
 
         Err(RuntimeError::NoReturn)
     }
-    
 
     pub fn reset(&mut self) {
         self.stack.clear()

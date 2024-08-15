@@ -1,6 +1,8 @@
 use core::panic;
+use std::u8;
 
 use crate::object::ObjectType;
+use crate::vm::OpCode;
 use crate::{
     heap::GcHeap,
     scanner::{Token, TokenType},
@@ -67,12 +69,131 @@ impl Precedence {
     }
 }
 
+/// Used to track variables in the LexicalStack.
+#[derive(Debug, Clone)]
+struct Local {
+    /// The name token of the local variable.
+    name: String,
+    /// The lexical scope depth of the variable, global=0 and increments from there.
+    depth: u64,
+    /// Flags if the variable has been initialized for use yet.
+    initialized: bool,
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Local {
+            name: String::default(),
+            depth: 0,
+            initialized: false,
+        }
+    }
+}
+
+pub const MAX_LOCAL_COUNT: usize = (u8::MAX as usize) + 1;
+
+/// Struct used to track the lexical scope and list of defined variables
+#[derive(Debug)]
+pub struct LexicalStack {
+    // We are only allowed 1 bytes worth of local variables since we just index into the stack
+    locals: [Local; MAX_LOCAL_COUNT],
+    local_count: usize,
+    scope_depth: u64,
+}
+
+impl LexicalStack {
+    pub fn new() -> LexicalStack {
+        LexicalStack {
+            locals: std::array::from_fn(|_| Local::default()),
+            local_count: 0,
+            scope_depth: 0,
+        }
+    }
+
+    pub fn current_depth(&self) -> u64 {
+        self.scope_depth
+    }
+
+    pub fn begin_scope(&mut self) {
+        self.scope_depth += 1
+    }
+
+    /// Closes the currently tracked scope, removes local variables and returns the number removed
+    pub fn end_scope(&mut self) -> u8 {
+        self.scope_depth -= 1;
+        assert!(self.scope_depth >= 0);
+
+        let mut num_popped = 0;
+        while self.local_count > 0 && self.locals[self.local_count - 1].depth > self.scope_depth {
+            num_popped += 1;
+            self.local_count -= 1;
+        }
+
+        num_popped
+    }
+
+    pub fn add_local(&mut self, name: String) -> Result<(), CompilationError> {
+        if self.local_count >= MAX_LOCAL_COUNT {
+            return Err(CompilationError::TooManyLocals);
+        }
+
+        // Check for double declarations
+        for i in (0..self.local_count).rev() {
+            let local = &self.locals[i];
+            if local.depth < self.current_depth() {
+                break;
+            }
+
+            if name == local.name {
+                return Err(CompilationError::RedeclaredVariable);
+            }
+        }
+
+        self.locals[self.local_count] = Local {
+            name,
+            depth: self.scope_depth,
+            initialized: false,
+        };
+        self.local_count += 1;
+
+        Ok(())
+    }
+
+    pub fn mark_initialized(&mut self) {
+        self.locals[self.local_count - 1].initialized = true;
+    }
+
+    /// Attempts to find a local with the given name. Returns an a stack index as a Some(u8) if the
+    /// variable exists.
+    pub fn resolve_local(&self, name: &str) -> Result<Option<u8>, CompilationError> {
+        for i in (0..self.local_count).rev() {
+            let local = &self.locals[i];
+
+            if local.name == name {
+                if !local.initialized {
+                    return Err(CompilationError::VarSelfInitUse);
+                }
+                assert!(i < MAX_LOCAL_COUNT);
+                return Ok(Some(i as u8));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
 #[derive(Debug)]
 pub enum CompilationError {
-    /// The compiler did not expect to see a token of the given type in its current state.
+    /// The compiler did not expect to see a token of the given type in its current state
     UnexpectedToken { token: Token, msg: String },
-    /// Expected the file to have more tokens but none were present.
+    /// Expected the file to have more tokens but none were present
     ExhaustedTokens,
+    /// There are more than 256 local variables in scope
+    TooManyLocals,
+    /// A variable with this name has already been declared in this scope
+    RedeclaredVariable,
+    /// Use of variable in its own initializer
+    VarSelfInitUse,
 }
 
 #[derive(Debug)]
@@ -87,6 +208,7 @@ pub struct Compiler<'vm> {
     position: usize,
     _had_error: bool,
     current_chunk: Option<vm::Chunk>,
+    lexical_stack: LexicalStack,
 }
 
 impl<'vm> Compiler<'vm> {
@@ -101,6 +223,7 @@ impl<'vm> Compiler<'vm> {
             position: 0,
             _had_error: false,
             current_chunk: None,
+            lexical_stack: LexicalStack::new(),
         }
     }
 
@@ -178,6 +301,11 @@ impl<'vm> Compiler<'vm> {
             .clone()
     }
 
+    /// Returns true if the current token is equal to the provided type
+    fn check_token(&self, ttype: &TokenType) -> bool {
+        self.current_token().ttype.is_variant_eq(ttype)
+    }
+
     /// Advance the compiler by one token and return the token.
     fn advance_token(&mut self) -> Token {
         let tok = self.current_token();
@@ -196,7 +324,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     /// Advance the compiler assuming the current token matches the expected type.
-    /// Panics if the token doesn't match the expected type.
+    /// Returns a compilation error if the token type doesn't match.
     fn consume_token(&mut self, expected_ttype: TokenType) -> Result<(), CompilationError> {
         let current_ttype = self.current_token().ttype;
         if !current_ttype.is_variant_eq(&expected_ttype) {
@@ -256,7 +384,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_variable_decl(&mut self) -> Result<(), CompilationError> {
-        let name_index = self.parse_variable()?;
+        let name_index = self.define_variable()?;
 
         // Emit the variable declaration value
         if self.match_token(TokenType::Equal) {
@@ -265,20 +393,39 @@ impl<'vm> Compiler<'vm> {
             self.emit_op(vm::OpCode::Nil);
         };
 
-        self.emit_op_and_arg(vm::OpCode::DefineGlobal, name_index);
+        if self.lexical_stack.current_depth() > 0 {
+            self.consume_token(TokenType::Semicolon)?;
+            return Ok(());
+        }
+
+
+        self.emit_op_and_arg(
+            vm::OpCode::DefineGlobal,
+            name_index.expect("Name is global and is Some(u8)"),
+        );
         self.consume_token(TokenType::Semicolon)?;
 
         Ok(())
     }
 
-    /// Returns the index to the variable name constant
-    fn parse_variable(&mut self) -> Result<u8, CompilationError> {
+    /// Defines a variable as either a global or a local in the scope tracker. If it's a global,
+    /// return an index to the name constant in the code block, locals return Ok(None)
+    fn define_variable(&mut self) -> Result<Option<u8>, CompilationError> {
         self.consume_token(TokenType::Identifier {
             name: String::default(),
         })?;
 
+        // In the case of a local variable, we don't need to do a runtime name-based lookup
+        if self.lexical_stack.current_depth() > 0 {
+            match self.previous_token().ttype {
+                TokenType::Identifier { name } => self.lexical_stack.add_local(name)?,
+                _ => unreachable!("Previous token was just confirmed to be an Identifier"),
+            }
+            return Ok(None);
+        }
+
         match self.previous_token().ttype {
-            TokenType::Identifier { name } => Ok(self.make_identifier_constant(name)),
+            TokenType::Identifier { name } => Ok(Some(self.make_identifier_constant(name))),
             _ => unreachable!("Previous must be an Identifier token"),
         }
     }
@@ -291,11 +438,35 @@ impl<'vm> Compiler<'vm> {
                 self.consume_token(TokenType::Semicolon)?;
                 self.emit_op(vm::OpCode::Print);
             }
+            TokenType::LeftBrace => {
+                self.advance_token();
+                self.parse_block()?;
+            }
             // Expr statement
             _ => {
                 self.parse_expression()?;
                 self.consume_token(TokenType::Semicolon)?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn parse_block(&mut self) -> Result<(), CompilationError> {
+        self.lexical_stack.begin_scope();
+
+        while !self.check_token(&TokenType::RightBrace) && !self.check_token(&TokenType::Eof) {
+            // TODO: How does error sync work with the lexical stack state?
+            // Probably need to catch the error and unwind the scope before throwing it further up the
+            // the chain
+            self.parse_declaration()?;
+        }
+
+        self.consume_token(TokenType::RightBrace)?;
+        let num_popped = self.lexical_stack.end_scope();
+
+        for _ in 0..num_popped {
+            self.emit_op(vm::OpCode::Pop)
         }
 
         Ok(())
@@ -410,14 +581,25 @@ impl<'vm> Compiler<'vm> {
             ..
         } = self.previous_token()
         {
-            let name_index = self.make_identifier_constant(name);
+            let get_op: OpCode;
+            let set_op: OpCode;
+            let arg: u8;
+            if let Some(local_var_slot) = self.lexical_stack.resolve_local(&name)? {
+                get_op = OpCode::GetLocal;
+                set_op = OpCode::SetLocal;
+                arg = local_var_slot;
+            } else {
+                get_op = OpCode::GetGlobal;
+                set_op = OpCode::SetGlobal;
+                arg = self.make_identifier_constant(name);
+            }
 
             // Depending on the next token we will change get vs set
             if can_assign && self.match_token(TokenType::Equal) {
                 self.parse_expression()?;
-                self.emit_op_and_arg(vm::OpCode::SetGlobal, name_index);
+                self.emit_op_and_arg(set_op, arg);
             } else {
-                self.emit_op_and_arg(vm::OpCode::GetGlobal, name_index);
+                self.emit_op_and_arg(get_op, arg);
             }
 
             return Ok(());
@@ -496,6 +678,8 @@ impl<'vm> Compiler<'vm> {
 
         Ok(())
     }
+
+    /* Helper functions */
 
     fn make_identifier_constant(&mut self, name: String) -> u8 {
         let heap_ref = self.heap.allocate(ObjectType::String(name.clone()));
