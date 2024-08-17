@@ -1,5 +1,5 @@
 use core::panic;
-use std::u8;
+use std::{u16, u8};
 
 use crate::object::ObjectType;
 use crate::vm::OpCode;
@@ -8,9 +8,6 @@ use crate::{
     scanner::{Token, TokenType},
     vm,
 };
-
-// TODO: Convert expectations in this module into properly handled errors.
-// Include error sycronization at statement-like points.
 
 #[derive(Debug, PartialEq, PartialOrd)]
 enum Precedence {
@@ -61,7 +58,6 @@ impl Precedence {
             TokenType::Star => Precedence::Factor,
             TokenType::Slash => Precedence::Factor,
             TokenType::Bang => Precedence::Unary,
-            // TODO: Handle this case?
             // TokenType::Minus => Precedence::Call,
             TokenType::Dot => Precedence::Call,
             _ => Precedence::None,
@@ -254,8 +250,6 @@ impl<'vm> Compiler<'vm> {
         }
 
         //self.emit_op(vm::OpCode::Return);
-
-        // TODO: Return proper error here
         if self.has_tokens() {
             panic!("Tokens remained after the EOF token")
         }
@@ -409,8 +403,6 @@ impl<'vm> Compiler<'vm> {
         );
         self.consume_token(TokenType::Semicolon)?;
 
-
-
         Ok(())
     }
 
@@ -448,6 +440,10 @@ impl<'vm> Compiler<'vm> {
                 self.advance_token();
                 self.parse_block()?;
             }
+            TokenType::If => {
+                self.advance_token();
+                self.parse_if();
+            }
             // Expr statement
             _ => {
                 self.parse_expression()?;
@@ -474,6 +470,20 @@ impl<'vm> Compiler<'vm> {
         for _ in 0..num_popped {
             self.emit_op(vm::OpCode::Pop)
         }
+
+        Ok(())
+    }
+
+    fn parse_if(&mut self) -> Result<(), CompilationError> {
+        // Condition
+        self.consume_token(TokenType::LeftParen)?;
+        self.parse_expression()?;
+        self.consume_token(TokenType::RightParen)?;
+
+        // Emit condition jump op
+        let then_jump = self.emit_jump();
+        self.parse_stmt()?; // Then Condition
+        self.patch_jump(then_jump);
 
         Ok(())
     }
@@ -699,6 +709,13 @@ impl<'vm> Compiler<'vm> {
 
     /* Byte code emitters */
 
+    fn emit_byte(&mut self, byte: u8) {
+        let line = self.previous_token().line;
+        self.current_chunk()
+            .expect("Chunk should be defined to write ops")
+            .write(byte, line);
+    }
+
     fn emit_op(&mut self, op: vm::OpCode) {
         let line = self.previous_token().line;
         self.current_chunk()
@@ -717,6 +734,38 @@ impl<'vm> Compiler<'vm> {
         let chunk = self.current_chunk().expect("Chunk should be defined.");
         let index = chunk.add_constant(value);
         self.emit_op_and_arg(vm::OpCode::Constant, index)
+    }
+
+    fn emit_jump(&mut self) -> usize {
+        self.emit_op(vm::OpCode::JumpIfFalse);
+        // Placeholder value since we don't know where to jump to yet
+        self.emit_byte(0);
+        self.emit_byte(0);
+
+        // Return index to the start of the two blank bytes so we can write in the location later
+        self.current_chunk().unwrap().code.len() - 2
+    }
+
+    /// Patches a jump with the current chunk location
+    fn patch_jump(&mut self, patch_location: usize) {
+        let chunk = self.current_chunk().unwrap();
+
+        // ...
+        // JumpIfFalse
+        // Byte1 <--- patch_location
+        // Byte2                        
+        // ...                          --
+        // ... other code ...            | desired offset 
+        // ...                           |
+        // <--- chunk.code.len()        --
+        let target_location = chunk.code.len() - patch_location - 2;
+        if target_location > u16::MAX.into() {
+            panic!("Too large a code block to jump, currently unsupported")
+        }
+
+
+        chunk.overwrite(patch_location, (target_location >> 8) as u8);
+        chunk.overwrite(patch_location + 1, target_location as u8);
     }
 }
 

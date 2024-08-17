@@ -1,6 +1,7 @@
 use core::panic;
 use std::collections::HashMap;
-use std::fmt;
+use std::{fmt, u16};
+use std::slice::Iter;
 
 use crate::heap::{GcHeap, GcRef};
 use crate::object::{Object, ObjectType};
@@ -94,6 +95,7 @@ pub enum OpCode {
     Pop,
     GetLocal,
     SetLocal,
+    JumpIfFalse,
 }
 
 impl OpCode {
@@ -106,6 +108,7 @@ impl OpCode {
             Self::GetLocal => 1,
             Self::SetLocal => 1,
             Self::DefineGlobal => 1,
+            Self::JumpIfFalse => 2,
             _ => 0,
         }
     }
@@ -139,6 +142,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::GetLocal as u8 => Ok(OpCode::GetLocal),
             x if x == OpCode::SetLocal as u8 => Ok(OpCode::SetLocal),
             x if x == OpCode::Pop as u8 => Ok(OpCode::Pop),
+            x if x == OpCode::JumpIfFalse as u8 => Ok(OpCode::JumpIfFalse),
             _ => Err(()),
         }
     }
@@ -167,6 +171,14 @@ impl Chunk {
 
     pub fn write_op(&mut self, op: OpCode, line_num: u32) {
         self.write(op as u8, line_num)
+    }
+
+    pub fn overwrite(&mut self, location: usize, value: u8) {
+        if self.code.len() <= location {
+            panic!("Tried to write to a location outside the code chunk.")
+        }
+
+        let _ = std::mem::replace(&mut self.code[location], value);
     }
 
     pub fn add_constant(&mut self, value: LoxValue) -> u8 {
@@ -480,10 +492,29 @@ impl VM {
 
                     *variable_ref = new_value;
                 }
+                OpCode::JumpIfFalse => {
+                    let jump_offset = VM::pop_u16(&mut ip);
+                    let jump_condition = self.stack.pop().expect("jump condition exists");
+
+                    if jump_condition.is_falsey() {
+                        // TODO: Need to stop using the iterator ip approach since we need to be
+                        // able to jump backwards for loops
+                        for _ in 0..jump_offset {
+                            let _ = ip.next();
+                        }
+                    }
+                }
             }
         }
 
         Err(RuntimeError::NoReturn)
+    }
+
+    fn pop_u16(ip: &mut Iter<u8>) -> u16 {
+        let big_byte = *ip.next().unwrap();
+        let little_byte = *ip.next().unwrap();
+
+        ((big_byte as u16) << 8) + (little_byte as u16)
     }
 
     pub fn reset(&mut self) {
