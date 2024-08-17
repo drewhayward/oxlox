@@ -160,7 +160,9 @@ impl LexicalStack {
     }
 
     pub fn mark_initialized(&mut self) {
-        self.locals[self.local_count - 1].initialized = true;
+        if self.local_count != 0 {
+            self.locals[self.local_count - 1].initialized = true;
+        }
     }
 
     /// Attempts to find a local with the given name. Returns an a stack index as a Some(u8) if the
@@ -237,6 +239,7 @@ impl<'vm> Compiler<'vm> {
             match self.parse_declaration() {
                 Ok(_) => {}
                 Err(error) => {
+                    eprintln!("Error: line={} {:?}", self.current_token().line, error);
                     errors.push(error);
                     self.sychronize();
                 }
@@ -379,6 +382,7 @@ impl<'vm> Compiler<'vm> {
                 self.advance_token();
                 self.parse_variable_decl()
             }
+            TokenType::RightBrace => Ok(()),
             _ => self.parse_stmt(),
         }
     }
@@ -395,15 +399,17 @@ impl<'vm> Compiler<'vm> {
 
         if self.lexical_stack.current_depth() > 0 {
             self.consume_token(TokenType::Semicolon)?;
+            self.lexical_stack.mark_initialized();
             return Ok(());
         }
-
 
         self.emit_op_and_arg(
             vm::OpCode::DefineGlobal,
             name_index.expect("Name is global and is Some(u8)"),
         );
         self.consume_token(TokenType::Semicolon)?;
+
+
 
         Ok(())
     }
