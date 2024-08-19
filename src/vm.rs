@@ -248,8 +248,10 @@ impl VM {
     }
 
     pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), RuntimeError> {
-        let mut ip = chunk.code.iter();
-        while let Some(current_byte) = ip.next() {
+        // Instruction pointer to the op yet to be executed
+        let mut ip = 0;
+
+        while let Some(current_byte) = chunk.code.get(ip) {
             let op: OpCode = u8::try_into(*current_byte)
                 .expect("Attempted to decode a byte which is not a valid OpCode");
 
@@ -261,7 +263,7 @@ impl VM {
                     return Ok(());
                 }
                 OpCode::Constant => {
-                    let index = *ip.next().expect("Expected index following constant op.");
+                    let index = Self::next_byte(&mut ip, &chunk).expect("Expected index following constant op.");
                     let constant = chunk.read_constant(index);
                     self.stack.push(constant);
                 }
@@ -432,7 +434,7 @@ impl VM {
                     println!("{value}")
                 }
                 OpCode::DefineGlobal => {
-                    let name_index = *ip.next().expect("Expected index following constant op.");
+                    let name_index = Self::next_byte(&mut ip, &chunk).expect("Expected index following constant op.");
                     let name_value = chunk.read_constant(name_index);
                     let global_value = self
                         .stack
@@ -452,8 +454,7 @@ impl VM {
                     };
                 }
                 OpCode::GetGlobal => {
-                    let name_index = *ip
-                        .next()
+                    let name_index = Self::next_byte(&mut ip, &chunk)
                         .expect("Expected var name index following constant op.");
                     let name: String = chunk.read_constant(name_index).try_into().unwrap();
                     let value = self.globals.get(&name).unwrap();
@@ -461,8 +462,7 @@ impl VM {
                     self.stack.push(value.clone())
                 }
                 OpCode::SetGlobal => {
-                    let name_index = *ip
-                        .next()
+                    let name_index = Self::next_byte(&mut ip, &chunk)
                         .expect("Expected var name index following constant op.");
                     let name: String = chunk.read_constant(name_index).try_into().unwrap();
 
@@ -473,7 +473,7 @@ impl VM {
                     let _ = self.stack.pop();
                 }
                 OpCode::GetLocal => {
-                    let stack_slot = *ip.next().expect("Stack slot exists");
+                    let stack_slot = Self::next_byte(&mut ip, &chunk).expect("Stack slot exists");
                     self.stack.push(
                         self.stack
                             .get(stack_slot as usize)
@@ -482,7 +482,7 @@ impl VM {
                     )
                 }
                 OpCode::SetLocal => {
-                    let stack_slot = *ip.next().expect("Stack slot exists");
+                    let stack_slot = Self::next_byte(&mut ip, &chunk).expect("Stack slot exists");
                     let new_value = self
                         .stack
                         .last()
@@ -497,37 +497,34 @@ impl VM {
                 }
                 OpCode::JumpIfFalse => {
                     let jump_condition = self.stack.last().expect("jump condition exists");
-                    let jump_offset = VM::read_u16(&mut ip);
+                    let jump_offset = VM::read_u16(&mut ip, chunk);
 
                     if jump_condition.is_falsey() {
-                        for _ in 0..jump_offset {
-                            let _ = ip.next();
-                        }
+                        ip += jump_offset as usize;
                     }
                 }
                 OpCode::Jump => {
-                    let jump_offset = VM::read_u16(&mut ip);
+                    let jump_offset = VM::read_u16(&mut ip, chunk);
 
-                    VM::jump_ip(&mut ip, jump_offset)
+                    ip += jump_offset as usize;
                 }
             }
+
+            ip += 1;
         }
 
         Err(RuntimeError::NoReturn)
     }
 
-    fn jump_ip(ip: &mut Iter<u8>, offset: u16) {
-        // TODO: Need to stop using the iterator ip approach since we need to be
-        // able to jump backwards for loops
-        for _ in 0..offset {
-            let _ = ip.next();
-        }
+    fn next_byte(ip: &mut usize, chunk: &Chunk) -> Option<u8> {
+        *ip += 1;
+        chunk.code.get(*ip).copied()
     }
 
     /// Read a u16 from the code chunk
-    fn read_u16(ip: &mut Iter<u8>) -> u16 {
-        let big_byte = *ip.next().unwrap();
-        let little_byte = *ip.next().unwrap();
+    fn read_u16(ip: &mut usize, chunk: &Chunk) -> u16 {
+        let big_byte = Self::next_byte(ip, chunk).unwrap();
+        let little_byte = Self::next_byte(ip, chunk).unwrap();
 
         ((big_byte as u16) << 8) + (little_byte as u16)
     }
