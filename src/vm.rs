@@ -1,7 +1,7 @@
 use core::panic;
 use std::collections::HashMap;
-use std::{fmt, u16};
 use std::slice::Iter;
+use std::{fmt, u16};
 
 use crate::heap::{GcHeap, GcRef};
 use crate::object::{Object, ObjectType};
@@ -96,6 +96,7 @@ pub enum OpCode {
     GetLocal,
     SetLocal,
     JumpIfFalse,
+    Jump,
 }
 
 impl OpCode {
@@ -109,6 +110,7 @@ impl OpCode {
             Self::SetLocal => 1,
             Self::DefineGlobal => 1,
             Self::JumpIfFalse => 2,
+            Self::Jump => 2,
             _ => 0,
         }
     }
@@ -143,6 +145,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::SetLocal as u8 => Ok(OpCode::SetLocal),
             x if x == OpCode::Pop as u8 => Ok(OpCode::Pop),
             x if x == OpCode::JumpIfFalse as u8 => Ok(OpCode::JumpIfFalse),
+            x if x == OpCode::Jump as u8 => Ok(OpCode::Jump),
             _ => Err(()),
         }
     }
@@ -497,17 +500,28 @@ impl VM {
                     let jump_condition = self.stack.pop().expect("jump condition exists");
 
                     if jump_condition.is_falsey() {
-                        // TODO: Need to stop using the iterator ip approach since we need to be
-                        // able to jump backwards for loops
                         for _ in 0..jump_offset {
                             let _ = ip.next();
                         }
                     }
                 }
+                OpCode::Jump => {
+                    let jump_offset = VM::pop_u16(&mut ip);
+
+                    VM::jump_ip(&mut ip, jump_offset)
+                }
             }
         }
 
         Err(RuntimeError::NoReturn)
+    }
+
+    fn jump_ip(ip: &mut Iter<u8>, offset: u16) {
+        // TODO: Need to stop using the iterator ip approach since we need to be
+        // able to jump backwards for loops
+        for _ in 0..offset {
+            let _ = ip.next();
+        }
     }
 
     fn pop_u16(ip: &mut Iter<u8>) -> u16 {

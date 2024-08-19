@@ -480,10 +480,20 @@ impl<'vm> Compiler<'vm> {
         self.parse_expression()?;
         self.consume_token(TokenType::RightParen)?;
 
-        // Emit condition jump op
-        let then_jump = self.emit_jump();
+        // Emit condition jump op + pop the condition off the stack
+        let then_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
         self.parse_stmt()?; // Then Condition
+
+        let else_jump = self.emit_jump(OpCode::Jump);
+
         self.patch_jump(then_jump);
+        self.emit_op(OpCode::Pop);
+        if self.match_token(TokenType::Else) {
+            self.parse_stmt()?; // Else Condition
+        }
+
+        self.patch_jump(else_jump);
 
         Ok(())
     }
@@ -736,8 +746,8 @@ impl<'vm> Compiler<'vm> {
         self.emit_op_and_arg(vm::OpCode::Constant, index)
     }
 
-    fn emit_jump(&mut self) -> usize {
-        self.emit_op(vm::OpCode::JumpIfFalse);
+    fn emit_jump(&mut self, jump_op: OpCode) -> usize {
+        self.emit_op(jump_op);
         // Placeholder value since we don't know where to jump to yet
         self.emit_byte(0);
         self.emit_byte(0);
@@ -753,16 +763,15 @@ impl<'vm> Compiler<'vm> {
         // ...
         // JumpIfFalse
         // Byte1 <--- patch_location
-        // Byte2                        
+        // Byte2
         // ...                          --
-        // ... other code ...            | desired offset 
+        // ... other code ...            | desired offset
         // ...                           |
         // <--- chunk.code.len()        --
         let target_location = chunk.code.len() - patch_location - 2;
         if target_location > u16::MAX.into() {
             panic!("Too large a code block to jump, currently unsupported")
         }
-
 
         chunk.overwrite(patch_location, (target_location >> 8) as u8);
         chunk.overwrite(patch_location + 1, target_location as u8);
