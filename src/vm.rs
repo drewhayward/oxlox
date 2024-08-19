@@ -496,8 +496,8 @@ impl VM {
                     *variable_ref = new_value;
                 }
                 OpCode::JumpIfFalse => {
-                    let jump_offset = VM::pop_u16(&mut ip);
-                    let jump_condition = self.stack.pop().expect("jump condition exists");
+                    let jump_condition = self.stack.last().expect("jump condition exists");
+                    let jump_offset = VM::read_u16(&mut ip);
 
                     if jump_condition.is_falsey() {
                         for _ in 0..jump_offset {
@@ -506,7 +506,7 @@ impl VM {
                     }
                 }
                 OpCode::Jump => {
-                    let jump_offset = VM::pop_u16(&mut ip);
+                    let jump_offset = VM::read_u16(&mut ip);
 
                     VM::jump_ip(&mut ip, jump_offset)
                 }
@@ -524,7 +524,8 @@ impl VM {
         }
     }
 
-    fn pop_u16(ip: &mut Iter<u8>) -> u16 {
+    /// Read a u16 from the code chunk
+    fn read_u16(ip: &mut Iter<u8>) -> u16 {
         let big_byte = *ip.next().unwrap();
         let little_byte = *ip.next().unwrap();
 

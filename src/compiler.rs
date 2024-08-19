@@ -569,6 +569,8 @@ impl<'vm> Compiler<'vm> {
             TokenType::GreaterEqual => Some(Compiler::handle_parse_binary),
             TokenType::Less => Some(Compiler::handle_parse_binary),
             TokenType::LessEqual => Some(Compiler::handle_parse_binary),
+            TokenType::And => Some(Compiler::handle_parse_and),
+            TokenType::Or => Some(Compiler::handle_parse_or),
             _ => None,
         }
     }
@@ -669,6 +671,28 @@ impl<'vm> Compiler<'vm> {
             TokenType::Bang => self.emit_op(vm::OpCode::Not),
             _ => unreachable!(),
         };
+
+        Ok(())
+    }
+
+    fn handle_parse_and(&mut self) -> Result<(), CompilationError> {
+        let end_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
+        self.parse_expr_w_precedence(Precedence::And)?;
+
+        self.patch_jump(end_jump);
+
+        Ok(())
+    }
+
+    fn handle_parse_or(&mut self) -> Result<(), CompilationError> {
+        let else_jump = self.emit_jump(OpCode::JumpIfFalse);
+        let end_jump = self.emit_jump(OpCode::Jump);
+        self.patch_jump(else_jump);
+        self.emit_op(OpCode::Pop);
+        self.parse_expr_w_precedence(Precedence::Or)?;
+
+        self.patch_jump(end_jump);
 
         Ok(())
     }
