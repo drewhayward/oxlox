@@ -97,6 +97,7 @@ pub enum OpCode {
     SetLocal,
     JumpIfFalse,
     Jump,
+    Loop,
 }
 
 impl OpCode {
@@ -111,6 +112,7 @@ impl OpCode {
             Self::DefineGlobal => 1,
             Self::JumpIfFalse => 2,
             Self::Jump => 2,
+            Self::Loop => 2,
             _ => 0,
         }
     }
@@ -145,7 +147,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::SetLocal as u8 => Ok(OpCode::SetLocal),
             x if x == OpCode::Pop as u8 => Ok(OpCode::Pop),
             x if x == OpCode::JumpIfFalse as u8 => Ok(OpCode::JumpIfFalse),
-            x if x == OpCode::Jump as u8 => Ok(OpCode::Jump),
+            x if x == OpCode::Loop as u8 => Ok(OpCode::Loop),
             _ => Err(()),
         }
     }
@@ -505,8 +507,11 @@ impl VM {
                 }
                 OpCode::Jump => {
                     let jump_offset = VM::read_u16(&mut ip, chunk);
-
                     ip += jump_offset as usize;
+                }
+                OpCode::Loop => {
+                    let jump_offset = VM::read_u16(&mut ip, chunk);
+                    ip -= jump_offset as usize;
                 }
             }
 

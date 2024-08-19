@@ -442,7 +442,11 @@ impl<'vm> Compiler<'vm> {
             }
             TokenType::If => {
                 self.advance_token();
-                self.parse_if();
+                self.parse_if()?;
+            }
+            TokenType::While => {
+                self.advance_token();
+                self.parse_while()?;
             }
             // Expr statement
             _ => {
@@ -494,6 +498,25 @@ impl<'vm> Compiler<'vm> {
         }
 
         self.patch_jump(else_jump);
+
+        Ok(())
+    }
+
+    fn parse_while(&mut self) -> Result<(), CompilationError> {
+        let loop_start = self.current_chunk().unwrap().code.len();
+
+        // Condition
+        self.consume_token(TokenType::LeftParen)?;
+        self.parse_expression()?;
+        self.consume_token(TokenType::RightParen)?;
+
+        let break_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
+        self.parse_stmt()?;
+        self.emit_loop(loop_start);
+
+        self.patch_jump(break_jump);
+        self.emit_op(OpCode::Pop);
 
         Ok(())
     }
@@ -800,6 +823,17 @@ impl<'vm> Compiler<'vm> {
         chunk.overwrite(patch_location, (target_location >> 8) as u8);
         chunk.overwrite(patch_location + 1, target_location as u8);
     }
+
+    /// Emit a loop back to the given start location
+    fn emit_loop(&mut self, jump_location: usize) {
+        self.emit_op(OpCode::Loop);
+
+        let current_location = self.current_chunk().unwrap().code.len() - jump_location + 2;        
+
+        self.emit_byte((current_location >> 8) as u8);
+        self.emit_byte(current_location   as u8);
+    }
+
 }
 
 #[cfg(test)]
