@@ -448,6 +448,10 @@ impl<'vm> Compiler<'vm> {
                 self.advance_token();
                 self.parse_while()?;
             }
+            TokenType::For => {
+                self.advance_token();
+                self.parse_for()?;
+            }
             // Expr statement
             _ => {
                 self.parse_expression()?;
@@ -517,6 +521,61 @@ impl<'vm> Compiler<'vm> {
 
         self.patch_jump(break_jump);
         self.emit_op(OpCode::Pop);
+
+        Ok(())
+    }
+
+    fn parse_for(&mut self) -> Result<(), CompilationError> {
+        self.lexical_stack.begin_scope();
+        self.consume_token(TokenType::LeftParen)?;
+
+        // Initializer
+        if self.match_token(TokenType::Var) {
+            self.parse_variable_decl()?;
+        } else {
+            self.parse_expression()?;
+            self.consume_token(TokenType::Semicolon)?;
+        }
+
+        // Condition
+        let loop_start = self.current_chunk().unwrap().code.len();
+        let mut exit_jump: Option<usize> = None;
+        if !self.match_token(TokenType::Semicolon) {
+            self.parse_expression()?;
+            self.consume_token(TokenType::Semicolon)?;
+
+            exit_jump = Some(self.emit_jump(OpCode::JumpIfFalse));
+            self.emit_op(OpCode::Pop);
+        }
+        let body_jump = self.emit_jump(OpCode::Jump);
+
+        // increment step
+        let mut increment_start: Option<usize> = None;
+        if !(self.match_token(TokenType::RightParen)) {
+            increment_start = Some(self.current_chunk().unwrap().code.len());
+
+            self.parse_expression()?;
+            self.emit_op(OpCode::Pop);
+
+            self.emit_loop(loop_start);
+            self.consume_token(TokenType::RightParen)?;
+        }
+
+        // Body
+        self.patch_jump(body_jump);
+        self.parse_stmt()?;
+
+        // If there isn't an increment condition we can just skip up to the loop start
+        if let Some(incr_start) = increment_start {
+            self.emit_loop(incr_start)
+        } else {
+            self.emit_loop(loop_start)
+        }
+
+        // End of loop
+        exit_jump.map(|exit_jump| self.patch_jump(exit_jump));
+        self.emit_op(OpCode::Pop);
+        self.lexical_stack.end_scope();
 
         Ok(())
     }
@@ -828,12 +887,11 @@ impl<'vm> Compiler<'vm> {
     fn emit_loop(&mut self, jump_location: usize) {
         self.emit_op(OpCode::Loop);
 
-        let current_location = self.current_chunk().unwrap().code.len() - jump_location + 2;        
+        let current_location = self.current_chunk().unwrap().code.len() - jump_location + 2;
 
         self.emit_byte((current_location >> 8) as u8);
-        self.emit_byte(current_location   as u8);
+        self.emit_byte(current_location as u8);
     }
-
 }
 
 #[cfg(test)]

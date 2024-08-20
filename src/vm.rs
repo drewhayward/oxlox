@@ -147,6 +147,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::SetLocal as u8 => Ok(OpCode::SetLocal),
             x if x == OpCode::Pop as u8 => Ok(OpCode::Pop),
             x if x == OpCode::JumpIfFalse as u8 => Ok(OpCode::JumpIfFalse),
+            x if x == OpCode::Jump as u8 => Ok(OpCode::Jump),
             x if x == OpCode::Loop as u8 => Ok(OpCode::Loop),
             _ => Err(()),
         }
@@ -265,7 +266,8 @@ impl VM {
                     return Ok(());
                 }
                 OpCode::Constant => {
-                    let index = Self::next_byte(&mut ip, &chunk).expect("Expected index following constant op.");
+                    let index = Self::next_byte(&mut ip, &chunk)
+                        .expect("Expected index following constant op.");
                     let constant = chunk.read_constant(index);
                     self.stack.push(constant);
                 }
@@ -436,7 +438,8 @@ impl VM {
                     println!("{value}")
                 }
                 OpCode::DefineGlobal => {
-                    let name_index = Self::next_byte(&mut ip, &chunk).expect("Expected index following constant op.");
+                    let name_index = Self::next_byte(&mut ip, &chunk)
+                        .expect("Expected index following constant op.");
                     let name_value = chunk.read_constant(name_index);
                     let global_value = self
                         .stack
