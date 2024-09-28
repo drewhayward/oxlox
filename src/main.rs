@@ -1,4 +1,4 @@
-use oxlox;
+use oxlox::{self, compiler::compile};
 use std::{fs, io::Read};
 
 fn help() {
@@ -18,13 +18,8 @@ fn run(args: Vec<String>) {
     let mut source: String = String::new();
     let _  = file.read_to_string(&mut source).expect("Failed to read file.");
 
-    let scanner = oxlox::scanner::Scanner::new(&source);
-    let tokens: Vec<_> = scanner.collect();
-
-    println!("{:?}", tokens);
-
-    let mut compiler = oxlox::compiler::Compiler::new(tokens, &mut vm.heap);
-    let code_chunk = compiler.compile().unwrap();
+    let result = compile(source, &mut vm.heap);
+    let code_chunk = result.unwrap();
 
     code_chunk.disassemble("Complied");
 

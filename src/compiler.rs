@@ -1,13 +1,17 @@
-use core::panic;
+use std::borrow::BorrowMut;
 use std::{u16, u8};
 
 use crate::object::ObjectType;
-use crate::vm::OpCode;
+use crate::scanner::Scanner;
+use crate::vm::{Chunk, OpCode};
 use crate::{
     heap::GcHeap,
     scanner::{Token, TokenType},
     vm,
 };
+
+// WIP: Pull the parser out of the compiler struct so we can stack the compilers and they share the
+// same parser/state
 
 #[derive(Debug, PartialEq, PartialOrd)]
 enum Precedence {
@@ -65,6 +69,90 @@ impl Precedence {
     }
 }
 
+#[derive(Debug)]
+struct Parser {
+    tokens: Vec<Token>,
+    position: usize,
+    total_consumed: u64,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Parser {
+        if tokens.is_empty() {
+            panic!("Attempting to parse an empty list of tokens")
+        }
+
+        Parser {
+            tokens,
+            position: 0,
+            total_consumed: 0,
+        }
+    }
+
+    /// Return a copy of the previous token. This is the most-recently consumed token.
+    fn previous_token(&self) -> Token {
+        self.tokens
+            .get(self.position - 1)
+            .expect("Tried to get a position outside the token buffer.")
+            .clone()
+    }
+
+    /// Return a copy of the current token being examined. This token has NOT been consumed.
+    fn current_token(&self) -> Token {
+        self.tokens
+            .get(self.position)
+            .expect("Tried to get a position outside the token buffer.")
+            .clone()
+    }
+
+    /// Return true if the current token of the provided type variant
+    fn check_token(&self, ttype: &TokenType) -> bool {
+        self.current_token().ttype.is_variant_eq(ttype)
+    }
+
+    /// Advance the compiler by one token and return the token.
+    fn advance_token(&mut self) -> Token {
+        let tok = self.current_token();
+        self.position += 1;
+        self.total_consumed += 1;
+
+        tok
+    }
+
+    fn match_token(&mut self, expected_ttype: TokenType) -> bool {
+        if self.current_token().ttype.is_variant_eq(&expected_ttype) {
+            self.advance_token();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Advance the compiler assuming the current token matches the expected type.
+    /// Returns a compilation error if the token type doesn't match.
+    fn consume_token(&mut self, expected_ttype: TokenType) -> Result<(), CompilationError> {
+        let current_ttype = self.current_token().ttype;
+        if !current_ttype.is_variant_eq(&expected_ttype) {
+            return Err(CompilationError::UnexpectedToken {
+                token: self.current_token(),
+                msg: format!(
+                    "Expected a token of type {:?} but found {:?}",
+                    expected_ttype, current_ttype
+                ),
+            });
+        }
+
+        self.advance_token();
+
+        Ok(())
+    }
+
+    /// Returns true if there are more non-EOF tokens to consume.
+    fn has_tokens(&self) -> bool {
+        self.position < self.tokens.len() && self.current_token().ttype != TokenType::Eof
+    }
+}
+
 /// Used to track variables in the LexicalStack.
 #[derive(Debug, Clone)]
 struct Local {
@@ -117,7 +205,6 @@ impl LexicalStack {
     /// Closes the currently tracked scope, removes local variables and returns the number removed
     pub fn end_scope(&mut self) -> u8 {
         self.scope_depth -= 1;
-        assert!(self.scope_depth >= 0);
 
         let mut num_popped = 0;
         while self.local_count > 0 && self.locals[self.local_count - 1].depth > self.scope_depth {
@@ -199,181 +286,132 @@ pub struct CompilationReport {
     pub errors: Vec<CompilationError>,
 }
 
+/// Used by the Complier to store per-function compliation results.
 #[derive(Debug)]
-pub struct Compiler<'vm> {
-    heap: &'vm mut GcHeap,
-    tokens: Vec<Token>,
-    position: usize,
-    _had_error: bool,
-    current_chunk: Option<vm::Chunk>,
+struct FuncComplier {
+    chunk: Chunk,
+    _enclosing: Option<Box<FuncComplier>>,
     lexical_stack: LexicalStack,
 }
 
-impl<'vm> Compiler<'vm> {
-    pub fn new(tokens: Vec<Token>, heap: &'vm mut GcHeap) -> Compiler {
-        if tokens.is_empty() {
-            panic!("Attempting to parse an empty list of tokens")
-        }
+#[derive(Debug)]
+struct Compiler<'vm> {
+    heap: &'vm mut GcHeap,
+    parser: Parser,
+    current_function: Option<FuncComplier>,
+}
 
+impl<'vm> Compiler<'vm> {
+    fn new(heap: &'vm mut GcHeap, parser: Parser) -> Compiler {
         Compiler {
             heap,
-            tokens,
-            position: 0,
-            _had_error: false,
-            current_chunk: None,
-            lexical_stack: LexicalStack::new(),
+            parser,
+            current_function: Some(FuncComplier {
+                chunk: vm::Chunk::new(),
+                lexical_stack: LexicalStack::new(),
+                _enclosing: None,
+            }),
         }
     }
 
-    pub fn compile(&mut self) -> Result<vm::Chunk, CompilationReport> {
-        // Create new compliation chunk
-        self.current_chunk = Some(vm::Chunk::new());
-
+    fn compile(&mut self) -> Result<vm::Chunk, CompilationReport> {
         let mut errors: Vec<CompilationError> = Vec::new();
-        let mut last_pos = self.position;
-        while !self.match_token(TokenType::Eof) {
+        let mut total_consumed = self.parser.total_consumed;
+        while !self.parser.match_token(TokenType::Eof) {
             match self.parse_declaration() {
                 Ok(_) => {}
                 Err(error) => {
-                    eprintln!("Error: line={} {:?}", self.current_token().line, error);
+                    eprintln!(
+                        "Error: line={} {:?}",
+                        self.parser.current_token().line,
+                        error
+                    );
                     errors.push(error);
-                    self.sychronize();
+                    //self.sychronize();
                 }
             }
 
             // Ensure we're making progress
-            if last_pos == self.position {
+            let consumed = self.parser.total_consumed;
+            if total_consumed == consumed {
                 panic!("We're stuck in a parsing loop");
             } else {
-                last_pos = self.position;
+                total_consumed = consumed;
             }
         }
 
         //self.emit_op(vm::OpCode::Return);
-        if self.has_tokens() {
+        if self.parser.has_tokens() {
             panic!("Tokens remained after the EOF token")
         }
 
-        match self.current_chunk.take() {
-            Some(chunk) => Ok(chunk),
-            None => unreachable!("Chunk should be defined."),
-        }
+
+        // Extract out the compiled script function
+        Ok(self.current_function.take().unwrap().chunk)
     }
 
     fn current_chunk(&mut self) -> Option<&mut vm::Chunk> {
-        self.current_chunk.as_mut()
+        self.current_function
+            .as_mut()
+            .map(|func_comp| func_comp.chunk.borrow_mut())
     }
 
-    fn _error_at(&mut self, token: &Token, message: &str) {
-        eprint!("[line {}] Error", token.line);
-        match token.ttype {
-            TokenType::Eof => eprint!(" at end."),
-            TokenType::Error => {}
-            _ => eprint!(" at {:?} on line {}", token.ttype, token.line),
-        }
-
-        eprintln!("{}", message);
-        self._had_error = true;
+    /// Returns a mutable reference to the lexical stack of the function currently being compiled
+    fn current_lexical_stack(&mut self) -> &mut LexicalStack {
+        self.current_function
+            .as_mut()
+            .unwrap()
+            .lexical_stack
+            .borrow_mut()
     }
+
+    //fn _error_at(&mut self, token: &Token, message: &str) {
+    //    eprint!("[line {}] Error", token.line);
+    //    match token.ttype {
+    //        TokenType::Eof => eprint!(" at end."),
+    //        TokenType::Error => {}
+    //        _ => eprint!(" at {:?} on line {}", token.ttype, token.line),
+    //    }
+    //
+    //    eprintln!("{}", message);
+    //    self._had_error = true;
+    //}
 
     /* Parsing Methods
      * These methods parse the token stream and emit bytecode at the same time.
      */
-
-    /// Return a copy of the previous token. This is the most-recently consumed
-    /// token.
-    fn previous_token(&self) -> Token {
-        self.tokens
-            .get(self.position - 1)
-            .expect("Tried to get a position outside the token buffer.")
-            .clone()
-    }
-
-    /// Return a copy of the current token being examined. This token has NOT
-    /// been consumed.
-    fn current_token(&self) -> Token {
-        self.tokens
-            .get(self.position)
-            .expect("Tried to get a position outside the token buffer.")
-            .clone()
-    }
-
     /// Returns true if the current token is equal to the provided type
-    fn check_token(&self, ttype: &TokenType) -> bool {
-        self.current_token().ttype.is_variant_eq(ttype)
-    }
-
-    /// Advance the compiler by one token and return the token.
-    fn advance_token(&mut self) -> Token {
-        let tok = self.current_token();
-        self.position += 1;
-
-        tok
-    }
-
-    fn match_token(&mut self, expected_ttype: TokenType) -> bool {
-        if self.current_token().ttype.is_variant_eq(&expected_ttype) {
-            self.advance_token();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Advance the compiler assuming the current token matches the expected type.
-    /// Returns a compilation error if the token type doesn't match.
-    fn consume_token(&mut self, expected_ttype: TokenType) -> Result<(), CompilationError> {
-        let current_ttype = self.current_token().ttype;
-        if !current_ttype.is_variant_eq(&expected_ttype) {
-            return Err(CompilationError::UnexpectedToken {
-                token: self.current_token(),
-                msg: format!(
-                    "Expected a token of type {:?} but found {:?}",
-                    expected_ttype, current_ttype
-                ),
-            });
-        }
-
-        self.advance_token();
-
-        Ok(())
-    }
-
-    /// Returns true if there are more non-EOF tokens to consume.
-    fn has_tokens(&self) -> bool {
-        self.position < self.tokens.len() && self.current_token().ttype != TokenType::Eof
-    }
 
     /// Reset the parser to a good state from an error state by advancing to the next statement. Semicolons and statement
     /// starting terms are used to determine when to stop advancing.
-    fn sychronize(&mut self) {
-        self._had_error = false;
-
-        while self.current_token().ttype != TokenType::Eof {
-            if self.previous_token().ttype == TokenType::Semicolon {
-                return;
-            }
-
-            match self.current_token().ttype {
-                TokenType::Class => return,
-                TokenType::Fun => return,
-                TokenType::Var => return,
-                TokenType::For => return,
-                TokenType::If => return,
-                TokenType::While => return,
-                TokenType::Print => return,
-                TokenType::Return => return,
-                _ => {
-                    self.advance_token();
-                }
-            }
-        }
-    }
+    //fn sychronize(&mut self) {
+    //    self._had_error = false;
+    //
+    //    while self.current_token().ttype != TokenType::Eof {
+    //        if self.previous_token().ttype == TokenType::Semicolon {
+    //            return;
+    //        }
+    //
+    //        match self.current_token().ttype {
+    //            TokenType::Class => return,
+    //            TokenType::Fun => return,
+    //            TokenType::Var => return,
+    //            TokenType::For => return,
+    //            TokenType::If => return,
+    //            TokenType::While => return,
+    //            TokenType::Print => return,
+    //            TokenType::Return => return,
+    //            _ => {
+    //                self.advance_token();
+    //            }
+    //        }
+    //    }
+    //}
 
     fn parse_declaration(&mut self) -> Result<(), CompilationError> {
-        match self.current_token().ttype {
+        match self.parser.current_token().ttype {
             TokenType::Var => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_variable_decl()
             }
             TokenType::RightBrace => Ok(()),
@@ -385,15 +423,15 @@ impl<'vm> Compiler<'vm> {
         let name_index = self.define_variable()?;
 
         // Emit the variable declaration value
-        if self.match_token(TokenType::Equal) {
+        if self.parser.match_token(TokenType::Equal) {
             self.parse_expression()?;
         } else {
             self.emit_op(vm::OpCode::Nil);
         };
 
-        if self.lexical_stack.current_depth() > 0 {
-            self.consume_token(TokenType::Semicolon)?;
-            self.lexical_stack.mark_initialized();
+        if self.current_lexical_stack().current_depth() > 0 {
+            self.parser.consume_token(TokenType::Semicolon)?;
+            self.current_lexical_stack().mark_initialized();
             return Ok(());
         }
 
@@ -401,7 +439,7 @@ impl<'vm> Compiler<'vm> {
             vm::OpCode::DefineGlobal,
             name_index.expect("Name is global and is Some(u8)"),
         );
-        self.consume_token(TokenType::Semicolon)?;
+        self.parser.consume_token(TokenType::Semicolon)?;
 
         Ok(())
     }
@@ -409,53 +447,53 @@ impl<'vm> Compiler<'vm> {
     /// Defines a variable as either a global or a local in the scope tracker. If it's a global,
     /// return an index to the name constant in the code block, locals return Ok(None)
     fn define_variable(&mut self) -> Result<Option<u8>, CompilationError> {
-        self.consume_token(TokenType::Identifier {
+        self.parser.consume_token(TokenType::Identifier {
             name: String::default(),
         })?;
 
         // In the case of a local variable, we don't need to do a runtime name-based lookup
-        if self.lexical_stack.current_depth() > 0 {
-            match self.previous_token().ttype {
-                TokenType::Identifier { name } => self.lexical_stack.add_local(name)?,
+        if self.current_lexical_stack().current_depth() > 0 {
+            match self.parser.previous_token().ttype {
+                TokenType::Identifier { name } => self.current_lexical_stack().add_local(name)?,
                 _ => unreachable!("Previous token was just confirmed to be an Identifier"),
             }
             return Ok(None);
         }
 
-        match self.previous_token().ttype {
+        match self.parser.previous_token().ttype {
             TokenType::Identifier { name } => Ok(Some(self.make_identifier_constant(name))),
             _ => unreachable!("Previous must be an Identifier token"),
         }
     }
 
     fn parse_stmt(&mut self) -> Result<(), CompilationError> {
-        match self.current_token().ttype {
+        match self.parser.current_token().ttype {
             TokenType::Print => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_expression()?;
-                self.consume_token(TokenType::Semicolon)?;
+                self.parser.consume_token(TokenType::Semicolon)?;
                 self.emit_op(vm::OpCode::Print);
             }
             TokenType::LeftBrace => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_block()?;
             }
             TokenType::If => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_if()?;
             }
             TokenType::While => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_while()?;
             }
             TokenType::For => {
-                self.advance_token();
+                self.parser.advance_token();
                 self.parse_for()?;
             }
             // Expr statement
             _ => {
                 self.parse_expression()?;
-                self.consume_token(TokenType::Semicolon)?;
+                self.parser.consume_token(TokenType::Semicolon)?;
             }
         }
 
@@ -463,17 +501,19 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_block(&mut self) -> Result<(), CompilationError> {
-        self.lexical_stack.begin_scope();
+        self.current_lexical_stack().begin_scope();
 
-        while !self.check_token(&TokenType::RightBrace) && !self.check_token(&TokenType::Eof) {
+        while !self.parser.check_token(&TokenType::RightBrace)
+            && !self.parser.check_token(&TokenType::Eof)
+        {
             // TODO: How does error sync work with the lexical stack state?
             // Probably need to catch the error and unwind the scope before throwing it further up the
             // the chain
             self.parse_declaration()?;
         }
 
-        self.consume_token(TokenType::RightBrace)?;
-        let num_popped = self.lexical_stack.end_scope();
+        self.parser.consume_token(TokenType::RightBrace)?;
+        let num_popped = self.current_lexical_stack().end_scope();
 
         for _ in 0..num_popped {
             self.emit_op(vm::OpCode::Pop)
@@ -484,9 +524,9 @@ impl<'vm> Compiler<'vm> {
 
     fn parse_if(&mut self) -> Result<(), CompilationError> {
         // Condition
-        self.consume_token(TokenType::LeftParen)?;
+        self.parser.consume_token(TokenType::LeftParen)?;
         self.parse_expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.parser.consume_token(TokenType::RightParen)?;
 
         // Emit condition jump op + pop the condition off the stack
         let then_jump = self.emit_jump(OpCode::JumpIfFalse);
@@ -497,7 +537,7 @@ impl<'vm> Compiler<'vm> {
 
         self.patch_jump(then_jump);
         self.emit_op(OpCode::Pop);
-        if self.match_token(TokenType::Else) {
+        if self.parser.match_token(TokenType::Else) {
             self.parse_stmt()?; // Else Condition
         }
 
@@ -510,9 +550,9 @@ impl<'vm> Compiler<'vm> {
         let loop_start = self.current_chunk().unwrap().code.len();
 
         // Condition
-        self.consume_token(TokenType::LeftParen)?;
+        self.parser.consume_token(TokenType::LeftParen)?;
         self.parse_expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.parser.consume_token(TokenType::RightParen)?;
 
         let break_jump = self.emit_jump(OpCode::JumpIfFalse);
         self.emit_op(OpCode::Pop);
@@ -526,23 +566,23 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_for(&mut self) -> Result<(), CompilationError> {
-        self.lexical_stack.begin_scope();
-        self.consume_token(TokenType::LeftParen)?;
+        self.current_lexical_stack().begin_scope();
+        self.parser.consume_token(TokenType::LeftParen)?;
 
         // Initializer
-        if self.match_token(TokenType::Var) {
+        if self.parser.match_token(TokenType::Var) {
             self.parse_variable_decl()?;
         } else {
             self.parse_expression()?;
-            self.consume_token(TokenType::Semicolon)?;
+            self.parser.consume_token(TokenType::Semicolon)?;
         }
 
         // Condition
         let loop_start = self.current_chunk().unwrap().code.len();
         let mut exit_jump: Option<usize> = None;
-        if !self.match_token(TokenType::Semicolon) {
+        if !self.parser.match_token(TokenType::Semicolon) {
             self.parse_expression()?;
-            self.consume_token(TokenType::Semicolon)?;
+            self.parser.consume_token(TokenType::Semicolon)?;
 
             exit_jump = Some(self.emit_jump(OpCode::JumpIfFalse));
             self.emit_op(OpCode::Pop);
@@ -551,14 +591,14 @@ impl<'vm> Compiler<'vm> {
 
         // increment step
         let mut increment_start: Option<usize> = None;
-        if !(self.match_token(TokenType::RightParen)) {
+        if !(self.parser.match_token(TokenType::RightParen)) {
             increment_start = Some(self.current_chunk().unwrap().code.len());
 
             self.parse_expression()?;
             self.emit_op(OpCode::Pop);
 
             self.emit_loop(loop_start);
-            self.consume_token(TokenType::RightParen)?;
+            self.parser.consume_token(TokenType::RightParen)?;
         }
 
         // Body
@@ -575,7 +615,7 @@ impl<'vm> Compiler<'vm> {
         // End of loop
         exit_jump.map(|exit_jump| self.patch_jump(exit_jump));
         self.emit_op(OpCode::Pop);
-        self.lexical_stack.end_scope();
+        self.current_lexical_stack().end_scope();
 
         Ok(())
     }
@@ -586,10 +626,10 @@ impl<'vm> Compiler<'vm> {
 
     /// Parse an expression of a specific precedence level or higher.
     fn parse_expr_w_precedence(&mut self, prec: Precedence) -> Result<(), CompilationError> {
-        self.advance_token();
+        self.parser.advance_token();
 
         // Check for prefix rule
-        let previous_ttype = self.previous_token().ttype;
+        let previous_ttype = self.parser.previous_token().ttype;
         let prefix_handler = self.lookup_prefix_handler(&previous_ttype).expect(
             format!(
                 "There should be a prefix rule for token type {:?}",
@@ -602,9 +642,9 @@ impl<'vm> Compiler<'vm> {
         prefix_handler(self, can_assign)?;
 
         // Check for infix rules while the observed prec is the same or higher
-        while prec <= Precedence::from_token(&self.current_token().ttype) {
-            self.advance_token();
-            let previous_ttype = self.previous_token().ttype;
+        while prec <= Precedence::from_token(&self.parser.current_token().ttype) {
+            self.parser.advance_token();
+            let previous_ttype = self.parser.previous_token().ttype;
             let infix_handler = self
                 .lookup_infix_handler(previous_ttype)
                 .expect("Infix rule should exist if the precedence is higher for this token.");
@@ -661,7 +701,7 @@ impl<'vm> Compiler<'vm> {
         if let Token {
             ttype: TokenType::Number(value),
             ..
-        } = self.previous_token()
+        } = self.parser.previous_token()
         {
             self.emit_constant(vm::LoxValue::Number(value));
             Ok(())
@@ -674,7 +714,7 @@ impl<'vm> Compiler<'vm> {
         if let Token {
             ttype: TokenType::String { literal },
             ..
-        } = self.previous_token()
+        } = self.parser.previous_token()
         {
             let heap_ref = self.heap.allocate(ObjectType::String(literal.clone()));
             self.emit_constant(vm::LoxValue::Object(heap_ref));
@@ -689,12 +729,12 @@ impl<'vm> Compiler<'vm> {
         if let Token {
             ttype: TokenType::Identifier { name },
             ..
-        } = self.previous_token()
+        } = self.parser.previous_token()
         {
             let get_op: OpCode;
             let set_op: OpCode;
             let arg: u8;
-            if let Some(local_var_slot) = self.lexical_stack.resolve_local(&name)? {
+            if let Some(local_var_slot) = self.current_lexical_stack().resolve_local(&name)? {
                 get_op = OpCode::GetLocal;
                 set_op = OpCode::SetLocal;
                 arg = local_var_slot;
@@ -705,7 +745,7 @@ impl<'vm> Compiler<'vm> {
             }
 
             // Depending on the next token we will change get vs set
-            if can_assign && self.match_token(TokenType::Equal) {
+            if can_assign && self.parser.match_token(TokenType::Equal) {
                 self.parse_expression()?;
                 self.emit_op_and_arg(set_op, arg);
             } else {
@@ -719,13 +759,13 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn handle_parse_literal(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
-        match self.previous_token().ttype {
+        match self.parser.previous_token().ttype {
             TokenType::Nil => self.emit_op(vm::OpCode::Nil),
             TokenType::True => self.emit_op(vm::OpCode::True),
             TokenType::False => self.emit_op(vm::OpCode::False),
             _ => {
                 return Err(CompilationError::UnexpectedToken {
-                    token: self.previous_token(),
+                    token: self.parser.previous_token(),
                     msg: "Unexpected token for literal".to_string(),
                 });
             }
@@ -737,13 +777,13 @@ impl<'vm> Compiler<'vm> {
     fn handle_parse_grouping(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
         // Reset the precedence since the parens ensure unambiguous parsing
         self.parse_expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.parser.consume_token(TokenType::RightParen)?;
 
         Ok(())
     }
 
     fn handle_parse_unary(&mut self, _can_assign: bool) -> Result<(), CompilationError> {
-        let operator_type = self.previous_token().ttype;
+        let operator_type = self.parser.previous_token().ttype;
 
         // Parse the unary operand
         self.parse_expr_w_precedence(Precedence::Unary)?;
@@ -780,7 +820,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn handle_parse_binary(&mut self) -> Result<(), CompilationError> {
-        let op_type = self.previous_token().ttype;
+        let op_type = self.parser.previous_token().ttype;
         let op_precedence = Precedence::from_token(&op_type);
 
         self.parse_expr_w_precedence(op_precedence.successor())?;
@@ -826,21 +866,21 @@ impl<'vm> Compiler<'vm> {
     /* Byte code emitters */
 
     fn emit_byte(&mut self, byte: u8) {
-        let line = self.previous_token().line;
+        let line = self.parser.previous_token().line;
         self.current_chunk()
             .expect("Chunk should be defined to write ops")
             .write(byte, line);
     }
 
     fn emit_op(&mut self, op: vm::OpCode) {
-        let line = self.previous_token().line;
+        let line = self.parser.previous_token().line;
         self.current_chunk()
             .expect("Chunk should be defined to write ops")
             .write_op(op, line);
     }
 
     fn emit_op_and_arg(&mut self, op: vm::OpCode, arg: u8) {
-        let line = self.previous_token().line;
+        let line = self.parser.previous_token().line;
         let chunk = self.current_chunk().expect("Chunk should be defined.");
         chunk.write_op(op, line);
         chunk.write(arg, line);
@@ -894,6 +934,17 @@ impl<'vm> Compiler<'vm> {
     }
 }
 
+pub fn compile(source: String, heap: &mut GcHeap) -> Result<Chunk, CompilationReport> {
+    // In the book, he uses global C pointers which are accessible by all the functions. Here we'll
+    // just need to keep those structs in scope in the compile function
+    let scanner = Scanner::new(&source);
+    let parser = Parser::new(scanner.collect());
+
+    let mut compiler = Compiler::new(heap, parser);
+
+    return compiler.compile();
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -908,10 +959,8 @@ mod test {
     #[test]
     fn it_emits_chunks() {
         let mut heap = GcHeap::new();
-        let input_tokens: Vec<_> = ttypes_to_tokens(vec![TokenType::Eof]);
-        let mut compiler = Compiler::new(input_tokens, &mut heap);
-        let chunk = compiler.compile().unwrap();
+        let chunk = compile("".to_string(), &mut heap);
 
-        assert!(chunk.code.len() == 0, "Chunk should be empty")
+        assert!(chunk.unwrap().code.len() == 0, "Chunk should be empty")
     }
 }
