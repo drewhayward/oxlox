@@ -1,64 +1,74 @@
+use std::cell::RefCell;
 use std::{
+    cell::{Ref, RefMut},
     collections::HashMap,
-    ops::{Deref, DerefMut},
     ptr::NonNull,
 };
 
-use crate::object::{Object, ObjectType};
+use crate::object::Object;
 
-/// A reference to a Gc-managed value which allows cloning and dropping while ignoring the borrow
-/// checking rules.
-#[derive(Debug, Copy)]
-pub struct GcRef<T> {
-    ptr: *mut T,
+/// A node in the linked-list of the [GcHeap]. Owns both the value in the entry and the next value
+/// in the linked-list
+///
+/// See [GcHeap] for more information
+#[derive(Debug)]
+struct GcEntry {
+    // TODO: Do we need this to not be owned?
+    next: Option<NonNull<GcEntry>>,
+    value: RefCell<Object>,
 }
 
-impl<T> GcRef<T> {
-    pub fn ptr_equal(&self, other: &GcRef<T>) -> bool {
-        self.ptr == other.ptr
+/// A smart-pointer to a garbage-collected lox [Object]
+///
+/// Uses RefCell to safely manage access, [GcHeap] is responsible for dropping the underlying
+/// object
+#[derive(Debug)]
+pub struct Gc {
+    entry: NonNull<GcEntry>,
+}
+
+impl Gc {
+    /// Obtain a [Ref] to the underlying GC object
+    pub fn borrow(&self) -> Ref<'_, Object> {
+        // SAFETY
+        // GcHeap enforces that an entry will remain valid until all reachable Gc refs are gone
+        let entry = unsafe { &*NonNull::as_ptr(self.entry) };
+
+        entry.value.borrow()
+    }
+
+    /// Obtain a [RefMut] to the underlying GC object
+    pub fn borrow_mut<'a>(&'a self) -> RefMut<'a, Object> {
+        // SAFETY
+        // GcHeap enforces that an entry will remain valid until all reachable Gc refs are gone
+        let entry = unsafe { &*NonNull::as_ptr(self.entry) };
+
+        entry.value.borrow_mut()
     }
 }
 
-impl GcRef<Object> {
-    /// Obtain a ref to the underlying GC object
-    pub fn as_obj_ref(&self) -> &ObjectType {
-        &self.value
-    }
-
-    /// Obtain a mutable ref to the underlying GC object
-    pub fn as_obj_mut(&mut self) -> &mut ObjectType {
-        &mut self.value
-    }
-}
-
-impl<T> Clone for GcRef<T> {
+impl Clone for Gc {
     fn clone(&self) -> Self {
-        GcRef { ptr: self.ptr }
+        Gc { entry: self.entry }
     }
 }
 
-impl<T> Deref for GcRef<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.ptr.as_ref().unwrap() }
-    }
-}
-
-impl<T> DerefMut for GcRef<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.ptr.as_mut().unwrap() }
-    }
-}
 
 /// Lox runtime heap which implements garbage collection using mark-and-sweep.
+///
+/// Objects are allocated by [GcHeap::allocate] which returns a [Gc] smart pointer.
+/// Access is mediated via [Gc::borrow] and [Gc::borrow_mut] which return
+/// [Ref<Object>]/[RefMut<Object>] respectively.
 #[derive(Debug)]
 pub struct GcHeap {
-    root: Option<NonNull<Object>>,
-    // Table for string interning
-    strings: HashMap<String, GcRef<Object>>,
+    /// Root to a linked list of garbage-collected values
+    root: Option<NonNull<GcEntry>>,
+
+    /// Table for string interning
+    strings: HashMap<String, Gc>,
 }
 
-impl GcHeap {
+impl GcHeap{
     pub fn new() -> GcHeap {
         GcHeap {
             root: None,
@@ -67,45 +77,37 @@ impl GcHeap {
     }
 
     /// Allocate an object on the heap and register it with the garbage collector.
-    pub fn allocate(&mut self, object: ObjectType) -> GcRef<Object> {
-        // String interning
-        let mut s_value: Option<String> = None;
-        if let ObjectType::String(s) = &object {
-            if let Some(gcref) = self.strings.get(s) {
-                return gcref.clone();
-            }
-
-            s_value = Some(s.clone());
-        }
-
-        let current_root = self.root.take();
-        let boxed = Box::new(Object {
-            next: current_root,
-            value: object,
+    pub fn allocate(&mut self, object: Object) -> Gc {
+        // Create new head of list
+        let new_entry = Box::new(GcEntry {
+            next: self.root.take(),
+            value: RefCell::new(object),
         });
 
-        self.root = NonNull::new(Box::into_raw(boxed));
+        // SAFETY
+        // We can safely make an unchecked [NonNull] because Box won't give us a null pointer
+        self.root = unsafe { Some(NonNull::new_unchecked(Box::into_raw(new_entry))) };
 
-        let gcref = GcRef {
-            ptr: self.root.unwrap().as_ptr(),
-        };
-
-        if let Some(s) = s_value {
-            self.strings.insert(s, gcref.clone());
+        let gcref = Gc {
+            entry: self.root.unwrap(),
         };
 
         gcref
     }
+
+    // TODO: Implement mark & sweep
 }
 
 impl Drop for GcHeap {
     fn drop(&mut self) {
         let mut current = self.root;
         while let Some(obj) = current {
-            unsafe {
-                current = obj.as_ref().next;
-                obj.drop_in_place();
-            }
+            // SAFETY
+            // This ptr was allocated by Box for type GcEntry and has not been freed by a GC
+            // collection. We are now transferring responsibility of dropping to this local Box
+            let mut entry = unsafe { Box::from_raw(NonNull::as_ptr(obj)) };
+
+            current = entry.next.take();
         }
     }
 }
@@ -115,26 +117,17 @@ mod test {
     use super::*;
 
     #[test]
+    #[should_panic]
     fn it_allocates() {
         let mut heap = GcHeap::new();
 
-        let obj1 = ObjectType::String("foo".to_string());
+        let obj1 = Object::String("foo".to_string());
 
         let ref1 = heap.allocate(obj1);
+        let ref2 = ref1.clone();
 
-        assert_eq!(ref1.value, ObjectType::String("foo".to_string()));
-    }
+        ref1.borrow_mut();
+        ref2.borrow_mut();
 
-    #[test]
-    fn it_interns_identical_strings() {
-        let mut heap = GcHeap::new();
-
-        let obj1 = ObjectType::String("foo".to_string());
-        let obj2 = ObjectType::String("foo".to_string());
-
-        let gcref1 = heap.allocate(obj1);
-        let gcref2 = heap.allocate(obj2);
-
-        assert_eq!(gcref1.ptr, gcref2.ptr)
     }
 }

@@ -63,16 +63,16 @@ pub struct Token {
 }
 
 /// Implements the Iterator interface to yield Lox tokens from a Lox source string.
-pub struct Scanner<'a> {
-    source: &'a str,
-    current: Peekable<CharIndices<'a>>,
+pub struct Scanner<'src> {
+    source: &'src str,
+    current: Peekable<CharIndices<'src>>,
     line: u32,
     complete: bool,
 }
 
-impl<'a> Scanner<'a> {
+impl<'src> Scanner<'src> {
     /// Construct a new scanner from a source string.
-    pub fn new(source: &str) -> Scanner {
+    pub fn new(source: &'src str) -> Scanner<'src> {
         Scanner {
             source,
             current: str::char_indices(source).peekable(),

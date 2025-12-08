@@ -1,7 +1,7 @@
 use std::borrow::BorrowMut;
 use std::{u16, u8};
 
-use crate::object::ObjectType;
+use crate::object::Object;
 use crate::scanner::Scanner;
 use crate::vm::{Chunk, OpCode};
 use crate::{
@@ -302,7 +302,7 @@ struct Compiler<'vm> {
 }
 
 impl<'vm> Compiler<'vm> {
-    fn new(heap: &'vm mut GcHeap, parser: Parser) -> Compiler {
+    fn new(heap: &'vm mut GcHeap, parser: Parser) -> Compiler<'vm> {
         Compiler {
             heap,
             parser,
@@ -716,7 +716,7 @@ impl<'vm> Compiler<'vm> {
             ..
         } = self.parser.previous_token()
         {
-            let heap_ref = self.heap.allocate(ObjectType::String(literal.clone()));
+            let heap_ref = self.heap.allocate(Object::String(literal.clone()));
             self.emit_constant(vm::LoxValue::Object(heap_ref));
 
             Ok(())
@@ -854,7 +854,7 @@ impl<'vm> Compiler<'vm> {
     /* Helper functions */
 
     fn make_identifier_constant(&mut self, name: String) -> u8 {
-        let heap_ref = self.heap.allocate(ObjectType::String(name.clone()));
+        let heap_ref = self.heap.allocate(Object::String(name.clone()));
         let lox_value = vm::LoxValue::Object(heap_ref);
 
         let chunk = self.current_chunk().unwrap();

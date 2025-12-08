@@ -1,17 +1,16 @@
 use core::panic;
 use std::collections::HashMap;
-use std::slice::Iter;
 use std::{fmt, u16};
 
-use crate::heap::{GcHeap, GcRef};
-use crate::object::{Object, ObjectType};
+use crate::heap::{Gc, GcHeap};
+use crate::object::Object;
 
 #[derive(Debug, Clone)]
 pub enum LoxValue {
     Nil,
     Number(f64),
     Bool(bool),
-    Object(GcRef<Object>),
+    Object(Gc),
 }
 
 impl LoxValue {
@@ -22,12 +21,11 @@ impl LoxValue {
         }
     }
 
-    /// Helper function to access a lox value as an object. Returns None if LoxValue is not an
-    /// object
-    fn as_obj_type(&self) -> Option<&ObjectType> {
-        match self {
-            LoxValue::Object(obj) => Some(obj.as_obj_ref()),
-            _ => None,
+    fn as_obj_type(&self) -> Option<&Gc> {
+        if let LoxValue::Object(gc) = self {
+            Some(&gc)
+        } else {
+            None
         }
     }
 }
@@ -37,8 +35,11 @@ impl TryFrom<LoxValue> for String {
     type Error = ();
 
     fn try_from(value: LoxValue) -> Result<Self, Self::Error> {
-        match value.as_obj_type().ok_or(())? {
-            ObjectType::String(value) => Ok(value.to_owned()),
+        match &value {
+            LoxValue::Object(gc) => match &*gc.borrow() {
+                Object::String(value) => Ok(value.to_owned()),
+            },
+            _ => Err(()),
         }
     }
 }
@@ -49,8 +50,8 @@ impl fmt::Display for LoxValue {
             LoxValue::Nil => write!(f, "nil"),
             LoxValue::Number(number) => write!(f, "{}", number),
             LoxValue::Bool(value) => write!(f, "{}", value),
-            LoxValue::Object(object) => match &object.value {
-                ObjectType::String(value) => write!(f, "{}", value),
+            LoxValue::Object(object) => match &*object.borrow() {
+                Object::String(value) => write!(f, "{}", value),
             },
         }
     }
@@ -61,9 +62,10 @@ impl PartialEq for LoxValue {
             (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
             (Self::Nil, _) => true,
             (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
-            (Self::Object(lhs), Self::Object(rhs)) => match (&lhs.value, &rhs.value) {
-                // If they are strings we can compare their pointers since all strings are interned
-                (ObjectType::String(_), ObjectType::String(_)) => lhs.ptr_equal(rhs),
+            (Self::Object(lhs), Self::Object(rhs)) => match (&*lhs.borrow(), &*rhs.borrow()) {
+                (l, r) => l == r, // TODO: Bring back string interning
+                                  // If they are strings we can compare their pointers since all strings are interned
+                                  // (Object::String(_), Object::String(_)) => lhs.ptr_equal(rhs),
             },
             // If Value types don't match then they aren't equal.
             _ => false,
@@ -290,11 +292,11 @@ impl VM {
                             self.stack.push(LoxValue::Number(lhs_value + rhs_value))
                         }
                         (LoxValue::Object(lhs_rc), LoxValue::Object(rhs_rc)) => {
-                            match (lhs_rc.as_obj_ref(), rhs_rc.as_obj_ref()) {
-                                (ObjectType::String(lhs_value), ObjectType::String(rhs_value)) => {
-                                    let new_value = self.heap.allocate(ObjectType::String(
-                                        lhs_value.clone() + rhs_value,
-                                    ));
+                            match (&*lhs_rc.borrow(), &*rhs_rc.borrow()) {
+                                (Object::String(lhs_value), Object::String(rhs_value)) => {
+                                    let new_value = self
+                                        .heap
+                                        .allocate(Object::String(lhs_value.clone() + rhs_value));
 
                                     self.stack.push(LoxValue::Object(new_value))
                                 } //_ => {
@@ -441,16 +443,16 @@ impl VM {
                     let name_index = Self::next_byte(&mut ip, &chunk)
                         .expect("Expected index following constant op.");
                     let name_value = chunk.read_constant(name_index);
+                    let name_obj = name_value
+                        .as_obj_type()
+                        .expect("Stack value should be an object");
                     let global_value = self
                         .stack
                         .pop()
                         .expect("Should have a value on the stack for global definition");
 
-                    match name_value
-                        .as_obj_type()
-                        .expect("Stack value should be an object")
-                    {
-                        ObjectType::String(value) => {
+                    match &*name_obj.borrow() {
+                        Object::String(value) => {
                             self.globals.insert(value.to_owned(), global_value);
                         }
                         _ => unreachable!(
