@@ -53,7 +53,6 @@ impl Clone for Gc {
     }
 }
 
-
 /// Lox runtime heap which implements garbage collection using mark-and-sweep.
 ///
 /// Objects are allocated by [GcHeap::allocate] which returns a [Gc] smart pointer.
@@ -68,7 +67,7 @@ pub struct GcHeap {
     strings: HashMap<String, Gc>,
 }
 
-impl GcHeap{
+impl GcHeap {
     pub fn new() -> GcHeap {
         GcHeap {
             root: None,
@@ -117,8 +116,28 @@ mod test {
     use super::*;
 
     #[test]
+    fn shares_memory() {
+        let mut heap = GcHeap::new();
+
+        let ref1 = heap.allocate(Object::String("foo".to_string()));
+        let ref2 = ref1.clone();
+
+        {
+            let mut a = ref2.borrow_mut();
+            match *a {
+                Object::String(ref mut s) => *s = "bar".to_string(),
+            }
+        }
+
+        let b = ref1.borrow();
+        match *b {
+            Object::String(ref s) => assert_eq!(*s, "bar".to_string()),
+        }
+    }
+
+    #[test]
     #[should_panic]
-    fn it_allocates() {
+    fn panics_on_double_mut() {
         let mut heap = GcHeap::new();
 
         let obj1 = Object::String("foo".to_string());
@@ -126,8 +145,9 @@ mod test {
         let ref1 = heap.allocate(obj1);
         let ref2 = ref1.clone();
 
-        ref1.borrow_mut();
-        ref2.borrow_mut();
+        let a = ref1.borrow_mut();
+        let b = ref2.borrow_mut();
 
+        println!("{:?} {:?}", a, b);
     }
 }
