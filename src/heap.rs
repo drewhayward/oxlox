@@ -5,31 +5,31 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::object::Object;
+use crate::object::HeapObject;
 
 /// A node in the linked-list of the [GcHeap]. Owns both the value in the entry and the next value
 /// in the linked-list
 ///
 /// See [GcHeap] for more information
 #[derive(Debug)]
-struct GcEntry {
+struct GcEntry<T> {
     // TODO: Do we need this to not be owned?
-    next: Option<NonNull<GcEntry>>,
-    value: RefCell<Object>,
+    next: Option<NonNull<GcEntry<T>>>,
+    value: RefCell<T>,
 }
 
-/// A smart-pointer to a garbage-collected lox [Object]
+/// A handle to a heap allocation containing a value of type `T`.
 ///
 /// Uses RefCell to safely manage access, [GcHeap] is responsible for dropping the underlying
 /// object
 #[derive(Debug)]
-pub struct Gc {
-    entry: NonNull<GcEntry>,
+pub struct Gc<T> {
+    entry: NonNull<GcEntry<T>>,
 }
 
-impl Gc {
+impl<T> Gc<T> {
     /// Obtain a [Ref] to the underlying GC object
-    pub fn borrow(&self) -> Ref<'_, Object> {
+    pub fn borrow(&self) -> Ref<'_, T> {
         // SAFETY
         // GcHeap enforces that an entry will remain valid until all reachable Gc refs are gone
         let entry = unsafe { &*NonNull::as_ptr(self.entry) };
@@ -38,7 +38,7 @@ impl Gc {
     }
 
     /// Obtain a [RefMut] to the underlying GC object
-    pub fn borrow_mut<'a>(&'a self) -> RefMut<'a, Object> {
+    pub fn borrow_mut(&self) -> RefMut<'_, T> {
         // SAFETY
         // GcHeap enforces that an entry will remain valid until all reachable Gc refs are gone
         let entry = unsafe { &*NonNull::as_ptr(self.entry) };
@@ -47,7 +47,7 @@ impl Gc {
     }
 }
 
-impl Clone for Gc {
+impl<T> Clone for Gc<T> {
     fn clone(&self) -> Self {
         Gc { entry: self.entry }
     }
@@ -57,14 +57,14 @@ impl Clone for Gc {
 ///
 /// Objects are allocated by [GcHeap::allocate] which returns a [Gc] smart pointer.
 /// Access is mediated via [Gc::borrow] and [Gc::borrow_mut] which return
-/// [Ref<Object>]/[RefMut<Object>] respectively.
+/// `Ref<HeapObject>`/`RefMut<HeapObject>` respectively.
 #[derive(Debug)]
 pub struct GcHeap {
     /// Root to a linked list of garbage-collected values
-    root: Option<NonNull<GcEntry>>,
+    root: Option<NonNull<GcEntry<HeapObject>>>,
 
     /// Table for string interning
-    strings: HashMap<String, Gc>,
+    strings: HashMap<String, Gc<HeapObject>>,
 }
 
 impl GcHeap {
@@ -76,7 +76,7 @@ impl GcHeap {
     }
 
     /// Allocate an object on the heap and register it with the garbage collector.
-    pub fn allocate(&mut self, object: Object) -> Gc {
+    pub fn allocate(&mut self, object: HeapObject) -> Gc<HeapObject> {
         // Create new head of list
         let new_entry = Box::new(GcEntry {
             next: self.root.take(),
@@ -119,20 +119,39 @@ mod test {
     fn shares_memory() {
         let mut heap = GcHeap::new();
 
-        let ref1 = heap.allocate(Object::String("foo".to_string()));
+        let ref1: Gc<HeapObject> = heap.allocate(HeapObject::String("foo".to_string()));
         let ref2 = ref1.clone();
 
         {
             let mut a = ref2.borrow_mut();
             match *a {
-                Object::String(ref mut s) => *s = "bar".to_string(),
+                HeapObject::String(ref mut s) => *s = "bar".to_string(),
+                _ => panic!("Expected a string"),
             }
         }
 
         let b = ref1.borrow();
         match *b {
-            Object::String(ref s) => assert_eq!(*s, "bar".to_string()),
+            HeapObject::String(ref s) => assert_eq!(*s, "bar".to_string()),
+            _ => panic!("Expected a string"),
         }
+    }
+
+    #[test]
+    fn supports_non_clone_payloads() {
+        struct Payload(i32);
+
+        let mut entry = GcEntry {
+            next: None,
+            value: RefCell::new(Payload(1)),
+        };
+        let handle: Gc<Payload> = Gc {
+            entry: NonNull::from(&mut entry),
+        };
+        let cloned = handle.clone();
+
+        cloned.borrow_mut().0 = 2;
+        assert_eq!(handle.borrow().0, 2);
     }
 
     #[test]
@@ -140,7 +159,7 @@ mod test {
     fn panics_on_double_mut() {
         let mut heap = GcHeap::new();
 
-        let obj1 = Object::String("foo".to_string());
+        let obj1 = HeapObject::String("foo".to_string());
 
         let ref1 = heap.allocate(obj1);
         let ref2 = ref1.clone();

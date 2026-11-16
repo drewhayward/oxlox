@@ -1,13 +1,16 @@
 use crate::vm::Chunk;
 
 /// Lox heap-allocated object value
-#[derive(Debug, PartialEq, Eq)]
-pub enum Object {
+#[derive(Debug, PartialEq)]
+pub enum HeapObject {
     String(String),
-    // Fn {
-    //     arity: i16,
-    //     chunk: Chunk,
-    //     // TODO: for now I'll just have Fn own its name
-    //     name: String,
-    // },
+    Fn(Function),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Function {
+    pub arity: i16,
+    pub chunk: Chunk,
+    // TODO: for now I'll just have Fn own its name
+    pub name: String,
 }

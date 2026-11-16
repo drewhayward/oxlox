@@ -1,7 +1,7 @@
 use std::borrow::BorrowMut;
 use std::{u16, u8};
 
-use crate::object::Object;
+use crate::object::HeapObject;
 use crate::scanner::Scanner;
 use crate::vm::{Chunk, OpCode};
 use crate::{
@@ -703,7 +703,7 @@ impl<'vm> Compiler<'vm> {
             ..
         } = self.parser.previous_token()
         {
-            self.emit_constant(vm::LoxValue::Number(value));
+            self.emit_constant(vm::Value::Number(value));
             Ok(())
         } else {
             unreachable!("handler should be called when number literal token is previous.")
@@ -716,8 +716,8 @@ impl<'vm> Compiler<'vm> {
             ..
         } = self.parser.previous_token()
         {
-            let heap_ref = self.heap.allocate(Object::String(literal.clone()));
-            self.emit_constant(vm::LoxValue::Object(heap_ref));
+            let heap_ref = self.heap.allocate(HeapObject::String(literal.clone()));
+            self.emit_constant(vm::Value::Object(heap_ref));
 
             Ok(())
         } else {
@@ -854,8 +854,8 @@ impl<'vm> Compiler<'vm> {
     /* Helper functions */
 
     fn make_identifier_constant(&mut self, name: String) -> u8 {
-        let heap_ref = self.heap.allocate(Object::String(name.clone()));
-        let lox_value = vm::LoxValue::Object(heap_ref);
+        let heap_ref = self.heap.allocate(HeapObject::String(name.clone()));
+        let lox_value = vm::Value::Object(heap_ref);
 
         let chunk = self.current_chunk().unwrap();
         let name_index = chunk.add_constant(lox_value);
@@ -886,7 +886,7 @@ impl<'vm> Compiler<'vm> {
         chunk.write(arg, line);
     }
 
-    fn emit_constant(&mut self, value: vm::LoxValue) {
+    fn emit_constant(&mut self, value: vm::Value) {
         let chunk = self.current_chunk().expect("Chunk should be defined.");
         let index = chunk.add_constant(value);
         self.emit_op_and_arg(vm::OpCode::Constant, index)

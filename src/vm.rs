@@ -1,19 +1,349 @@
 use core::panic;
+use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
+use std::fmt::write;
 use std::{fmt, u16};
 
 use crate::heap::{Gc, GcHeap};
-use crate::object::Object;
+use crate::object::{Function, HeapObject};
+use crate::vm::Value::Object;
+
+#[derive(Debug)]
+pub struct VM {
+    pub debug: bool,
+    pub heap: GcHeap,
+    stack: Vec<Value>,
+    frames: Vec<Frame>,
+    globals: HashMap<String, Value>,
+}
+
+impl VM {
+    pub fn new() -> VM {
+        VM {
+            heap: GcHeap::new(),
+            debug: false,
+            stack: Vec::new(),
+            frames: Vec::new(),
+            globals: HashMap::new(),
+        }
+    }
+
+    pub fn interpret(&mut self, function: Gc<HeapObject>) -> Result<(), RuntimeError> {
+        // Instruction pointer to the op yet to be executed
+        // TODO: How to init frames ?
+        self.frames.push(Frame {
+            function: function,
+            ip: 0,
+        });
+
+        while let Some(current_byte) = self.current_frame().read_u8() {
+            let op: OpCode = u8::try_into(current_byte)
+                .expect("Attempted to decode a byte which is not a valid OpCode");
+
+            // Consider a debug output of op codes and stack state here as we go
+            match op {
+                OpCode::Return => {
+                    let ret = self.stack.pop().expect("Should have a value to pop.");
+                    println!("{:?}", ret);
+                    return Ok(());
+                }
+                OpCode::Constant => {
+                    let index = self
+                        .current_frame()
+                        .read_u8()
+                        .expect("Expected index following constant op.");
+                    let constant = self.current_frame().read_constant(index);
+                    self.stack.push(constant);
+                }
+                OpCode::Negate => {
+                    let value = self.stack.pop().expect("Stack should have a value.");
+                    if let Value::Number(num_value) = value {
+                        self.stack.push(Value::Number(-num_value));
+                    } else {
+                        return Err(RuntimeError::TypeError(
+                            "Operand should be a number.".to_string(),
+                        ));
+                    }
+                }
+                OpCode::Add => {
+                    let rhs_value = self.stack.pop().expect("Should have an RHS value to add");
+                    let lhs_value = self.stack.pop().expect("Should have an LHS value to add");
+
+                    match (lhs_value, rhs_value) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value + rhs_value))
+                        }
+                        (Value::Object(lhs_rc), Value::Object(rhs_rc)) => {
+                            match (&*lhs_rc.borrow(), &*rhs_rc.borrow()) {
+                                (HeapObject::String(lhs_value), HeapObject::String(rhs_value)) => {
+                                    let new_value = self.heap.allocate(HeapObject::String(
+                                        lhs_value.clone() + rhs_value,
+                                    ));
+
+                                    self.stack.push(Value::Object(new_value))
+                                }
+                                _ => {
+                                    return Err(RuntimeError::TypeError(format!(
+                                        "Cannot add objects {:?} and {:?}",
+                                        lhs_rc, rhs_rc
+                                    )))
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Subtract => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to subtract");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to subtract");
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value - rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Multiply => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to multiply");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to multiply");
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value * rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Divide => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Number(lhs_value / rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Nil => self.stack.push(Value::Nil),
+                OpCode::True => self.stack.push(Value::Bool(true)),
+                OpCode::False => self.stack.push(Value::Bool(false)),
+                OpCode::Not => match self.stack.pop() {
+                    Some(value) => self.stack.push(Value::Bool(value.is_falsey())),
+                    None => panic!("Value should exist"),
+                },
+                OpCode::Equal => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+                    self.stack.push(Value::Bool(lhs == rhs));
+                }
+                OpCode::Greater => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Bool(lhs_value > rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Less => {
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an RHS value to divide");
+                    let lhs = self
+                        .stack
+                        .pop()
+                        .expect("Should have an LHS value to divide");
+
+                    match (lhs, rhs) {
+                        (Value::Number(lhs_value), Value::Number(rhs_value)) => {
+                            self.stack.push(Value::Bool(lhs_value < rhs_value))
+                        }
+                        _ => {
+                            return Err(RuntimeError::TypeError(
+                                "Operands should be numbers.".to_string(),
+                            ))
+                        }
+                    }
+                }
+                OpCode::Print => {
+                    let value = self.stack.pop().expect("should have a value to print");
+                    println!("{value}")
+                }
+                OpCode::DefineGlobal => {
+                    let name_index = self
+                        .current_frame()
+                        .read_u8()
+                        .expect("Expected index following constant op.");
+                    let name_value = self.current_frame().read_constant(name_index);
+                    let name_obj = name_value
+                        .as_obj_type()
+                        .expect("Stack value should be an object");
+                    let global_value = self
+                        .stack
+                        .pop()
+                        .expect("Should have a value on the stack for global definition");
+
+                    match &*name_obj.borrow() {
+                        HeapObject::String(value) => {
+                            self.globals.insert(value.to_owned(), global_value);
+                        }
+                        _ => unreachable!(
+                            "Lox values should be defined with an index to a string constant."
+                        ),
+                    };
+                }
+                OpCode::GetGlobal => {
+                    let name_index = self
+                        .current_frame()
+                        .read_u8()
+                        .expect("Expected var name index following constant op.");
+                    let name_value = self
+                        .current_frame()
+                        .read_constant(name_index);
+                    let name = name_value
+                        .borrow_string()
+                        .unwrap();
+                    let value = self.globals.get(&*name).unwrap();
+
+                    self.stack.push(value.clone())
+                }
+                OpCode::SetGlobal => {
+                    let name_index = self
+                        .current_frame()
+                        .read_u8()
+                        .expect("Expected var name index following constant op.");
+                    let name_value = self
+                        .current_frame()
+                        .read_constant(name_index);
+                    let name = name_value
+                        .borrow_string()
+                        .unwrap();
+
+                    let value = self.stack.pop().expect("Value should exist to set.");
+                    self.globals.insert(name.to_string(), value);
+                }
+                OpCode::Pop => {
+                    let _ = self.stack.pop();
+                }
+                OpCode::GetLocal => {
+                    let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
+                    self.stack.push(
+                        self.stack
+                            .get(stack_slot as usize)
+                            .expect("Local variable exists on the stack.")
+                            .clone(),
+                    )
+                }
+                OpCode::SetLocal => {
+                    let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
+                    let new_value = self
+                        .stack
+                        .last()
+                        .expect("New variable value exists on the stack.")
+                        .clone();
+                    let variable_ref = self
+                        .stack
+                        .get_mut(stack_slot as usize)
+                        .expect("local variable exists");
+
+                    *variable_ref = new_value;
+                }
+                OpCode::JumpIfFalse => {
+                    let jump_offset = self.current_frame().read_u16() as usize;
+                    let jump_condition = self.stack.last().expect("jump condition exists");
+
+                    if jump_condition.is_falsey() {
+                        self.current_frame().ip += jump_offset;
+                    }
+                }
+                OpCode::Jump => {
+                    let jump_offset = self.current_frame().read_u16() as usize;
+                    self.current_frame().ip += jump_offset;
+                }
+                OpCode::Loop => {
+                    let jump_offset = self.current_frame().read_u16() as usize;
+                    self.current_frame().ip -= jump_offset;
+                }
+                OpCode::Call => {
+                    let arg_count = self.current_frame().read_u8().expect("");
+
+                    // Lookup the object which should be a function and handle exceptions to that
+                    // Call the function object
+                    // - add a stack frame to `frames` and set ip appropriately
+                }
+            }
+        }
+
+        Err(RuntimeError::NoReturn)
+    }
+
+    fn current_frame(&mut self) -> &mut Frame {
+        self.frames.last_mut().expect("SHould have frame")
+    }
+}
 
 #[derive(Debug, Clone)]
-pub enum LoxValue {
+pub enum Value {
     Nil,
     Number(f64),
     Bool(bool),
-    Object(Gc),
+    Object(Gc<HeapObject>),
 }
 
-impl LoxValue {
+impl Value {
     fn is_falsey(&self) -> bool {
         match self {
             Self::Nil | Self::Bool(false) => true,
@@ -21,42 +351,41 @@ impl LoxValue {
         }
     }
 
-    fn as_obj_type(&self) -> Option<&Gc> {
-        if let LoxValue::Object(gc) = self {
+    fn as_obj_type(&self) -> Option<&Gc<HeapObject>> {
+        if let Value::Object(gc) = self {
             Some(&gc)
         } else {
             None
         }
     }
-}
 
-// Not sure how gross this is but I find myself doing this conversion a lot
-impl TryFrom<LoxValue> for String {
-    type Error = ();
+    fn borrow_string(&self) -> Option<Ref<'_, str>> {
+        let Value::Object(object) = self else {
+            return None;
+        };
 
-    fn try_from(value: LoxValue) -> Result<Self, Self::Error> {
-        match &value {
-            LoxValue::Object(gc) => match &*gc.borrow() {
-                Object::String(value) => Ok(value.to_owned()),
-            },
-            _ => Err(()),
-        }
+        Ref::filter_map(object.borrow(), |obj| match obj {
+            HeapObject::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .ok()
     }
 }
 
-impl fmt::Display for LoxValue {
+impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoxValue::Nil => write!(f, "nil"),
-            LoxValue::Number(number) => write!(f, "{}", number),
-            LoxValue::Bool(value) => write!(f, "{}", value),
-            LoxValue::Object(object) => match &*object.borrow() {
-                Object::String(value) => write!(f, "{}", value),
+            Value::Nil => write!(f, "nil"),
+            Value::Number(number) => write!(f, "{}", number),
+            Value::Bool(value) => write!(f, "{}", value),
+            Value::Object(object) => match &*object.borrow() {
+                HeapObject::String(value) => write!(f, "{}", value),
+                HeapObject::Fn(func) => write!(f, "{}<{}>", func.name, func.arity),
             },
         }
     }
 }
-impl PartialEq for LoxValue {
+impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
@@ -65,7 +394,7 @@ impl PartialEq for LoxValue {
             (Self::Object(lhs), Self::Object(rhs)) => match (&*lhs.borrow(), &*rhs.borrow()) {
                 (l, r) => l == r, // TODO: Bring back string interning
                                   // If they are strings we can compare their pointers since all strings are interned
-                                  // (Object::String(_), Object::String(_)) => lhs.ptr_equal(rhs),
+                                  // (HeapObject::String(_), HeapObject::String(_)) => lhs.ptr_equal(rhs),
             },
             // If Value types don't match then they aren't equal.
             _ => false,
@@ -100,6 +429,7 @@ pub enum OpCode {
     JumpIfFalse,
     Jump,
     Loop,
+    Call,
 }
 
 impl OpCode {
@@ -156,10 +486,11 @@ impl TryFrom<u8> for OpCode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Chunk {
     pub code: Vec<u8>,
-    pub values: Vec<LoxValue>,
+    pub values: Vec<Value>,
+    /// Source code line number for the code byte. Matches up with [Chunk::code]
     pub line_nums: Vec<u32>,
 }
 
@@ -189,7 +520,7 @@ impl Chunk {
         let _ = std::mem::replace(&mut self.code[location], value);
     }
 
-    pub fn add_constant(&mut self, value: LoxValue) -> u8 {
+    pub fn add_constant(&mut self, value: Value) -> u8 {
         if self.values.len() >= <u8 as Into<usize>>::into(std::u8::MAX) + 1 {
             panic!("Attempted to add more than 256 constants to a code chunk")
         }
@@ -198,7 +529,7 @@ impl Chunk {
         (self.values.len() - 1) as u8
     }
 
-    pub fn read_constant(&self, index: u8) -> LoxValue {
+    pub fn read_constant(&self, index: u8) -> Value {
         return self.values[index as usize].clone();
     }
 
@@ -234,313 +565,57 @@ pub enum ErrorKind {
     VmError(RuntimeError),
 }
 
+/// Manages the ip for a single code chunk.
 #[derive(Debug)]
-pub struct VM {
-    pub debug: bool,
-    pub heap: GcHeap,
-    stack: Vec<LoxValue>,
-    globals: HashMap<String, LoxValue>,
+pub struct Frame {
+    function: Gc<HeapObject>,
+    /// Code pointer into the function's [Chunk]. Always points to the next unread byte
+    ip: usize,
 }
 
-impl VM {
-    pub fn new() -> VM {
-        VM {
-            heap: GcHeap::new(),
-            debug: false,
-            stack: Vec::new(),
-            globals: HashMap::new(),
+impl Frame {
+    fn try_new(function: Gc<HeapObject>) -> Result<Frame, ()> {
+        // validate that heap ref points to a function once here so we can just unwrap in the
+        // helpers. Assumes refs don't change type
+        let is_func = matches!(*function.borrow(), HeapObject::Fn(_));
+
+        if is_func {
+            Ok(Self { function, ip: 0 })
+        } else {
+            Err(())
         }
     }
 
-    pub fn interpret(&mut self, chunk: &Chunk) -> Result<(), RuntimeError> {
-        // Instruction pointer to the op yet to be executed
-        let mut ip = 0;
-
-        while let Some(current_byte) = chunk.code.get(ip) {
-            let op: OpCode = u8::try_into(*current_byte)
-                .expect("Attempted to decode a byte which is not a valid OpCode");
-
-            // Consider a debug output of op codes and stack state here as we go
-            match op {
-                OpCode::Return => {
-                    let ret = self.stack.pop().expect("Should have a value to pop.");
-                    println!("{:?}", ret);
-                    return Ok(());
-                }
-                OpCode::Constant => {
-                    let index = Self::next_byte(&mut ip, &chunk)
-                        .expect("Expected index following constant op.");
-                    let constant = chunk.read_constant(index);
-                    self.stack.push(constant);
-                }
-                OpCode::Negate => {
-                    let value = self.stack.pop().expect("Stack should have a value.");
-                    if let LoxValue::Number(num_value) = value {
-                        self.stack.push(LoxValue::Number(-num_value));
-                    } else {
-                        return Err(RuntimeError::TypeError(
-                            "Operand should be a number.".to_string(),
-                        ));
-                    }
-                }
-                OpCode::Add => {
-                    let rhs_value = self.stack.pop().expect("Should have an RHS value to add");
-                    let lhs_value = self.stack.pop().expect("Should have an LHS value to add");
-
-                    match (lhs_value, rhs_value) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Number(lhs_value + rhs_value))
-                        }
-                        (LoxValue::Object(lhs_rc), LoxValue::Object(rhs_rc)) => {
-                            match (&*lhs_rc.borrow(), &*rhs_rc.borrow()) {
-                                (Object::String(lhs_value), Object::String(rhs_value)) => {
-                                    let new_value = self
-                                        .heap
-                                        .allocate(Object::String(lhs_value.clone() + rhs_value));
-
-                                    self.stack.push(LoxValue::Object(new_value))
-                                } //_ => {
-                                  //    return Err(RuntimeError::TypeError(format!(
-                                  //        "Cannot add objects {:?} and {:?}",
-                                  //        lhs_rc, rhs_rc
-                                  //    )))
-                                  //}
-                            }
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Subtract => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to subtract");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to subtract");
-
-                    match (lhs, rhs) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Number(lhs_value - rhs_value))
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Multiply => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to multiply");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to multiply");
-                    match (lhs, rhs) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Number(lhs_value * rhs_value))
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Divide => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to divide");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to divide");
-                    match (lhs, rhs) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Number(lhs_value / rhs_value))
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Nil => self.stack.push(LoxValue::Nil),
-                OpCode::True => self.stack.push(LoxValue::Bool(true)),
-                OpCode::False => self.stack.push(LoxValue::Bool(false)),
-                OpCode::Not => match self.stack.pop() {
-                    Some(value) => self.stack.push(LoxValue::Bool(value.is_falsey())),
-                    None => panic!("Value should exist"),
-                },
-                OpCode::Equal => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to divide");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to divide");
-                    self.stack.push(LoxValue::Bool(lhs == rhs));
-                }
-                OpCode::Greater => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to divide");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to divide");
-
-                    match (lhs, rhs) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Bool(lhs_value > rhs_value))
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Less => {
-                    let rhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an RHS value to divide");
-                    let lhs = self
-                        .stack
-                        .pop()
-                        .expect("Should have an LHS value to divide");
-
-                    match (lhs, rhs) {
-                        (LoxValue::Number(lhs_value), LoxValue::Number(rhs_value)) => {
-                            self.stack.push(LoxValue::Bool(lhs_value < rhs_value))
-                        }
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "Operands should be numbers.".to_string(),
-                            ))
-                        }
-                    }
-                }
-                OpCode::Print => {
-                    let value = self.stack.pop().expect("should have a value to print");
-                    println!("{value}")
-                }
-                OpCode::DefineGlobal => {
-                    let name_index = Self::next_byte(&mut ip, &chunk)
-                        .expect("Expected index following constant op.");
-                    let name_value = chunk.read_constant(name_index);
-                    let name_obj = name_value
-                        .as_obj_type()
-                        .expect("Stack value should be an object");
-                    let global_value = self
-                        .stack
-                        .pop()
-                        .expect("Should have a value on the stack for global definition");
-
-                    match &*name_obj.borrow() {
-                        Object::String(value) => {
-                            self.globals.insert(value.to_owned(), global_value);
-                        }
-                        _ => unreachable!(
-                            "Lox values should be defined with an index to a string constant."
-                        ),
-                    };
-                }
-                OpCode::GetGlobal => {
-                    let name_index = Self::next_byte(&mut ip, &chunk)
-                        .expect("Expected var name index following constant op.");
-                    let name: String = chunk.read_constant(name_index).try_into().unwrap();
-                    let value = self.globals.get(&name).unwrap();
-
-                    self.stack.push(value.clone())
-                }
-                OpCode::SetGlobal => {
-                    let name_index = Self::next_byte(&mut ip, &chunk)
-                        .expect("Expected var name index following constant op.");
-                    let name: String = chunk.read_constant(name_index).try_into().unwrap();
-
-                    let value = self.stack.pop().expect("Value should exist to set.");
-                    self.globals.insert(name, value);
-                }
-                OpCode::Pop => {
-                    let _ = self.stack.pop();
-                }
-                OpCode::GetLocal => {
-                    let stack_slot = Self::next_byte(&mut ip, &chunk).expect("Stack slot exists");
-                    self.stack.push(
-                        self.stack
-                            .get(stack_slot as usize)
-                            .expect("Local variable exists on the stack.")
-                            .clone(),
-                    )
-                }
-                OpCode::SetLocal => {
-                    let stack_slot = Self::next_byte(&mut ip, &chunk).expect("Stack slot exists");
-                    let new_value = self
-                        .stack
-                        .last()
-                        .expect("New variable value exists on the stack.")
-                        .clone();
-                    let variable_ref = self
-                        .stack
-                        .get_mut(stack_slot as usize)
-                        .expect("local variable exists");
-
-                    *variable_ref = new_value;
-                }
-                OpCode::JumpIfFalse => {
-                    let jump_condition = self.stack.last().expect("jump condition exists");
-                    let jump_offset = VM::read_u16(&mut ip, chunk);
-
-                    if jump_condition.is_falsey() {
-                        ip += jump_offset as usize;
-                    }
-                }
-                OpCode::Jump => {
-                    let jump_offset = VM::read_u16(&mut ip, chunk);
-                    ip += jump_offset as usize;
-                }
-                OpCode::Loop => {
-                    let jump_offset = VM::read_u16(&mut ip, chunk);
-                    ip -= jump_offset as usize;
-                }
-            }
-
-            ip += 1;
-        }
-
-        Err(RuntimeError::NoReturn)
+    /// Read the next chunk byte and advance the IP
+    fn read_u8(&mut self) -> Option<u8> {
+        self.borrow_function().chunk.code.get(self.ip).copied()
     }
 
-    fn next_byte(ip: &mut usize, chunk: &Chunk) -> Option<u8> {
-        *ip += 1;
-        chunk.code.get(*ip).copied()
-    }
-
-    /// Read a u16 from the code chunk
-    fn read_u16(ip: &mut usize, chunk: &Chunk) -> u16 {
-        let big_byte = Self::next_byte(ip, chunk).unwrap();
-        let little_byte = Self::next_byte(ip, chunk).unwrap();
+    /// Read the next u16 from the chunk that IP is pointing to
+    fn read_u16(&mut self) -> u16 {
+        let big_byte = Self::read_u8(self).expect("first byte should exist");
+        let little_byte = Self::read_u8(self).expect("second byte should exist");
 
         ((big_byte as u16) << 8) + (little_byte as u16)
     }
 
-    pub fn reset(&mut self) {
-        self.stack.clear()
+    fn borrow_function(&self) -> Ref<Function> {
+        Ref::map(self.function.borrow(), |heap_func| match heap_func {
+            HeapObject::Fn(func) => func,
+            _ => panic!("Heap ref should point to Function by construction"),
+        })
+    }
+
+    fn borrow_function_mut(&self) -> RefMut<Function> {
+        RefMut::map(self.function.borrow_mut(), |heap_func| match heap_func {
+            HeapObject::Fn(func) => func,
+            _ => panic!("Heap ref should point to Function by construction"),
+        })
+    }
+
+    fn read_constant(&self, index: u8) -> Value {
+        let func = self.borrow_function();
+        func.chunk.read_constant(index)
     }
 }
 
@@ -565,8 +640,8 @@ mod test {
     fn chunk_reads_its_writes() {
         let mut c = Chunk::new();
         let value = 42.0;
-        let index = c.add_constant(LoxValue::Number(value));
-        assert_eq!(LoxValue::Number(value), c.read_constant(index));
+        let index = c.add_constant(Value::Number(value));
+        assert_eq!(Value::Number(value), c.read_constant(index));
     }
 
     #[test]
@@ -576,7 +651,7 @@ mod test {
         let value = 42.0;
 
         for _ in 0..=255 + 1 {
-            let _ = c.add_constant(LoxValue::Number(value));
+            let _ = c.add_constant(Value::Number(value));
         }
     }
 }

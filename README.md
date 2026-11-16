@@ -2,6 +2,10 @@
 
 A Rust implementation of Lox from *Crafting Interpreters*.
 
+# TODOs
+
+- add an error handling system into the VM that isn't `expect("...")`
+
 ## Tests
 
 Run the existing Rust unit tests:
