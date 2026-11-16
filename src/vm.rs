@@ -29,8 +29,7 @@ impl VM {
     }
 
     pub fn interpret(&mut self, function: Gc<HeapObject>) -> Result<(), RuntimeError> {
-        // Instruction pointer to the op yet to be executed
-        // TODO: How to init frames ?
+        // Init the top level script callframe
         self.frames.push(Frame {
             function: function,
             ip: 0,
@@ -44,6 +43,7 @@ impl VM {
             match op {
                 OpCode::Return => {
                     let ret = self.stack.pop().expect("Should have a value to pop.");
+                    // TODO: Need to pop our call frame and put the ret value back on top
                     println!("{:?}", ret);
                     return Ok(());
                 }
@@ -250,12 +250,8 @@ impl VM {
                         .current_frame()
                         .read_u8()
                         .expect("Expected var name index following constant op.");
-                    let name_value = self
-                        .current_frame()
-                        .read_constant(name_index);
-                    let name = name_value
-                        .borrow_string()
-                        .unwrap();
+                    let name_value = self.current_frame().read_constant(name_index);
+                    let name = name_value.borrow_string().unwrap();
                     let value = self.globals.get(&*name).unwrap();
 
                     self.stack.push(value.clone())
@@ -265,12 +261,8 @@ impl VM {
                         .current_frame()
                         .read_u8()
                         .expect("Expected var name index following constant op.");
-                    let name_value = self
-                        .current_frame()
-                        .read_constant(name_index);
-                    let name = name_value
-                        .borrow_string()
-                        .unwrap();
+                    let name_value = self.current_frame().read_constant(name_index);
+                    let name = name_value.borrow_string().unwrap();
 
                     let value = self.stack.pop().expect("Value should exist to set.");
                     self.globals.insert(name.to_string(), value);
@@ -318,11 +310,22 @@ impl VM {
                     self.current_frame().ip -= jump_offset;
                 }
                 OpCode::Call => {
-                    let arg_count = self.current_frame().read_u8().expect("");
+                    let arg_count = self.current_frame().read_u8().expect("") as usize;
 
                     // Lookup the object which should be a function and handle exceptions to that
-                    // Call the function object
+                    let Value::Object(object) = self
+                        .stack
+                        .get(self.stack.len() - arg_count)
+                        .expect("Function should exist on the stack")
+                    else {
+                        return Err(RuntimeError::TypeError(
+                            "Expected an Object, got some other primative".to_string(),
+                        ));
+                    };
+
                     // - add a stack frame to `frames` and set ip appropriately
+                    self.frames
+                        .push(Frame::try_new(object.clone()).expect("object should be a function"));
                 }
             }
         }
@@ -436,6 +439,7 @@ impl OpCode {
     // Returns the number of arguments this opcode expects in the bytecode
     fn arity(&self) -> i32 {
         match *self {
+            Self::Call => 1,
             Self::Constant => 1,
             Self::GetGlobal => 1,
             Self::SetGlobal => 1,
