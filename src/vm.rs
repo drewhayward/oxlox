@@ -1,12 +1,10 @@
 use core::panic;
 use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
-use std::fmt::write;
 use std::{fmt, u16};
 
 use crate::heap::{Gc, GcHeap};
 use crate::object::{Function, HeapObject};
-use crate::vm::Value::Object;
 
 #[derive(Debug)]
 pub struct VM {
@@ -406,7 +404,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
-            (Self::Nil, _) => true,
+            (Self::Nil, Self::Nil) => true,
             (Self::Number(lhs), Self::Number(rhs)) => lhs == rhs,
             (Self::Object(lhs), Self::Object(rhs)) => match (&*lhs.borrow(), &*rhs.borrow()) {
                 (l, r) => l == r, // TODO: Bring back string interning
@@ -736,25 +734,312 @@ mod test {
         assert_eq!(vm.globals.get("result"), Some(&Value::Number(42.0)));
     }
 
-    #[test]
-    fn chunk_can_write_ops() {
-        let mut chunk = Chunk::new();
-        let ops = vec![OpCode::Add, OpCode::Subtract, OpCode::Multiply];
-        let op_bytes: Vec<_> = ops.iter().cloned().map(|op| op as u8).collect();
-
-        for op in ops {
-            chunk.write_op(op, 1);
-        }
-
-        assert_eq!(chunk.code, op_bytes)
+    fn run_chunk(vm: &mut VM, chunk: Chunk) -> Result<Option<Value>, RuntimeError> {
+        let function = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk,
+            name: "script".to_string(),
+        }));
+        vm.interpret(function)
     }
 
     #[test]
-    fn chunk_reads_its_writes() {
-        let mut c = Chunk::new();
-        let value = 42.0;
-        let index = c.add_constant(Value::Number(value));
-        assert_eq!(Value::Number(value), c.read_constant(index));
+    fn vm_executes_numeric_binary_ops() {
+        for (op, expected) in [
+            (OpCode::Add, 10.0),
+            (OpCode::Subtract, 6.0),
+            (OpCode::Multiply, 16.0),
+            (OpCode::Divide, 4.0),
+        ] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let lhs = chunk.add_constant(Value::Number(8.0));
+            let rhs = chunk.add_constant(Value::Number(2.0));
+            emit! { chunk; Constant(lhs); Constant(rhs); }
+            chunk.write_op(op.clone(), 1);
+            emit! { chunk; Return; }
+
+            let result = run_chunk(&mut vm, chunk).expect("Arithmetic should succeed");
+            assert_eq!(result, Some(Value::Number(expected)), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn vm_negates_a_number() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let number = chunk.add_constant(Value::Number(7.0));
+        emit! { chunk; Constant(number); Negate; Return; }
+
+        assert_eq!(
+            run_chunk(&mut vm, chunk).unwrap(),
+            Some(Value::Number(-7.0))
+        );
+    }
+
+    #[test]
+    fn vm_returns_literals() {
+        for op in [OpCode::Nil, OpCode::True, OpCode::False] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            chunk.write_op(op.clone(), 1);
+            emit! { chunk; Return; }
+
+            let result = run_chunk(&mut vm, chunk).unwrap();
+            match op {
+                OpCode::Nil => assert!(matches!(result, Some(Value::Nil))),
+                OpCode::True => assert!(matches!(result, Some(Value::Bool(true)))),
+                OpCode::False => assert!(matches!(result, Some(Value::Bool(false)))),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn vm_not_uses_lox_truthiness() {
+        for (input, expected) in [
+            (Value::Nil, true),
+            (Value::Bool(false), true),
+            (Value::Bool(true), false),
+            (Value::Number(0.0), false),
+        ] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let value = chunk.add_constant(input.clone());
+            emit! { chunk; Constant(value); Not; Return; }
+
+            assert_eq!(
+                run_chunk(&mut vm, chunk).unwrap(),
+                Some(Value::Bool(expected)),
+                "Not {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_compares_numbers_in_operand_order() {
+        for (op, lhs_value, rhs_value, expected) in [
+            (OpCode::Greater, 8.0, 2.0, true),
+            (OpCode::Greater, 2.0, 8.0, false),
+            (OpCode::Greater, 2.0, 2.0, false),
+            (OpCode::Less, 2.0, 8.0, true),
+            (OpCode::Less, 8.0, 2.0, false),
+            (OpCode::Less, 2.0, 2.0, false),
+        ] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let lhs = chunk.add_constant(Value::Number(lhs_value));
+            let rhs = chunk.add_constant(Value::Number(rhs_value));
+            emit! { chunk; Constant(lhs); Constant(rhs); }
+            chunk.write_op(op.clone(), 1);
+            emit! { chunk; Return; }
+
+            assert_eq!(
+                run_chunk(&mut vm, chunk).unwrap(),
+                Some(Value::Bool(expected)),
+                "{lhs_value} {op:?} {rhs_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_checks_equality_by_type_and_value() {
+        for (lhs_value, rhs_value, expected) in [
+            (Value::Number(2.0), Value::Number(2.0), true),
+            (Value::Number(2.0), Value::Number(3.0), false),
+            (Value::Bool(true), Value::Bool(true), true),
+            (Value::Bool(true), Value::Bool(false), false),
+            (Value::Nil, Value::Nil, true),
+            (Value::Number(0.0), Value::Bool(false), false),
+            (Value::Number(0.0), Value::Nil, false),
+            (Value::Nil, Value::Number(0.0), false),
+        ] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let lhs = chunk.add_constant(lhs_value.clone());
+            let rhs = chunk.add_constant(rhs_value.clone());
+            emit! { chunk; Constant(lhs); Constant(rhs); Equal; Return; }
+
+            assert_eq!(
+                run_chunk(&mut vm, chunk).unwrap(),
+                Some(Value::Bool(expected)),
+                "{lhs_value:?} == {rhs_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_add_concatenates_strings() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let hello = vm.heap.allocate(HeapObject::String("hello, ".to_string()));
+        let world = vm.heap.allocate(HeapObject::String("world".to_string()));
+        let lhs = chunk.add_constant(Value::Object(hello));
+        let rhs = chunk.add_constant(Value::Object(world));
+        emit! { chunk; Constant(lhs); Constant(rhs); Add; Return; }
+
+        let result = run_chunk(&mut vm, chunk).unwrap().unwrap();
+        assert_eq!(&*result.borrow_string().unwrap(), "hello, world");
+    }
+
+    #[test]
+    fn vm_rejects_invalid_numeric_operands() {
+        for op in [
+            OpCode::Add,
+            OpCode::Subtract,
+            OpCode::Multiply,
+            OpCode::Divide,
+            OpCode::Greater,
+            OpCode::Less,
+            OpCode::Negate,
+        ] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            if op != OpCode::Negate {
+                let number = chunk.add_constant(Value::Number(2.0));
+                emit! { chunk; Constant(number); }
+            }
+            emit! { chunk; True; }
+            chunk.write_op(op.clone(), 1);
+            emit! { chunk; Return; }
+
+            assert!(
+                matches!(run_chunk(&mut vm, chunk), Err(RuntimeError::TypeError(_))),
+                "{op:?} should reject a boolean operand"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_pop_discards_only_the_top_value() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let number = chunk.add_constant(Value::Number(42.0));
+        emit! { chunk; Constant(number); True; Pop; Return; }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+    }
+
+    #[test]
+    fn vm_gets_and_sets_a_local() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let initial = chunk.add_constant(Value::Number(10.0));
+        let replacement = chunk.add_constant(Value::Number(42.0));
+        emit! {
+            chunk;
+            Constant(initial);
+            Constant(replacement);
+            SetLocal(0);
+            Pop;
+            GetLocal(0);
+            Return;
+        }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+    }
+
+    #[test]
+    fn vm_defines_updates_and_reads_a_global() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let name = vm.heap.allocate(HeapObject::String("answer".to_string()));
+        let name_index = chunk.add_constant(Value::Object(name));
+        let initial = chunk.add_constant(Value::Number(10.0));
+        let replacement = chunk.add_constant(Value::Number(42.0));
+        emit! {
+            chunk;
+            Constant(initial);
+            DefineGlobal(name_index);
+            Constant(replacement);
+            SetGlobal(name_index);
+            GetGlobal(name_index);
+            Return;
+        }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert_eq!(vm.globals.get("answer"), Some(&Value::Number(42.0)));
+    }
+
+    #[test]
+    fn vm_jump_reads_a_two_byte_offset() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let result = chunk.add_constant(Value::Number(42.0));
+        // The offset 0x0100 skips 256 one-byte instructions.
+        emit! { chunk; Jump(1); }
+        chunk.write(0, 1);
+        for _ in 0..256 {
+            emit! { chunk; Nil; }
+        }
+        emit! { chunk; Constant(result); Return; }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert!(vm.stack.is_empty(), "Skipped instructions must not execute");
+    }
+
+    #[test]
+    fn vm_jump_if_false_selects_the_correct_branch() {
+        for (condition, expected) in [(false, 20.0), (true, 10.0)] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let condition_index = chunk.add_constant(Value::Bool(condition));
+            let then_value = chunk.add_constant(Value::Number(10.0));
+            let else_value = chunk.add_constant(Value::Number(20.0));
+            emit! { chunk; Constant(condition_index); JumpIfFalse(0); }
+            chunk.write(6, 1); // Skip the then branch, including its unconditional jump.
+            emit! { chunk; Pop; Constant(then_value); Jump(0); }
+            chunk.write(3, 1); // Skip the else branch.
+            emit! { chunk; Pop; Constant(else_value); Return; }
+
+            assert_eq!(
+                run_chunk(&mut vm, chunk).unwrap(),
+                Some(Value::Number(expected)),
+                "condition = {condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_loop_counts_down_a_local() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let three = chunk.add_constant(Value::Number(3.0));
+        let zero = chunk.add_constant(Value::Number(0.0));
+        let one = chunk.add_constant(Value::Number(1.0));
+        emit! {
+            chunk;
+            Constant(three);
+            GetLocal(0);
+            Constant(zero);
+            Greater;
+            JumpIfFalse(0);
+        }
+        chunk.write(12, 1); // Exit at the condition cleanup after the loop body.
+        emit! {
+            chunk;
+            Pop;
+            GetLocal(0);
+            Constant(one);
+            Subtract;
+            SetLocal(0);
+            Pop;
+            Loop(0);
+        }
+        chunk.write(20, 1); // Return to GetLocal at byte offset 2.
+        emit! { chunk; Pop; GetLocal(0); Return; }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(0.0)));
+    }
+
+    #[test]
+    fn vm_reports_a_chunk_without_return() {
+        let mut vm = VM::new();
+
+        assert!(matches!(
+            run_chunk(&mut vm, Chunk::new()),
+            Err(RuntimeError::NoReturn)
+        ));
     }
 
     #[test]
