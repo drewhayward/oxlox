@@ -28,7 +28,7 @@ impl VM {
         }
     }
 
-    pub fn interpret(&mut self, function: Gc<HeapObject>) -> Result<(), RuntimeError> {
+    pub fn interpret(&mut self, function: Gc<HeapObject>) -> Result<Option<Value>, RuntimeError> {
         // Init the top level script callframe
         self.frames.push(Frame {
             function: function,
@@ -42,10 +42,12 @@ impl VM {
             // Consider a debug output of op codes and stack state here as we go
             match op {
                 OpCode::Return => {
-                    let ret = self.stack.pop().expect("Should have a value to pop.");
-                    // TODO: Need to pop our call frame and put the ret value back on top
-                    println!("{:?}", ret);
-                    return Ok(());
+                    let frame_return = self.stack.pop().expect("Should have a value to pop.");
+                    self.pop_frame();
+                    if self.frames.is_empty() {
+                        return Ok(Some(frame_return))
+                    }
+                    self.stack.push(frame_return);
                 }
                 OpCode::Constant => {
                     let index = self
@@ -315,7 +317,7 @@ impl VM {
                     // Lookup the object which should be a function and handle exceptions to that
                     let Value::Object(object) = self
                         .stack
-                        .get(self.stack.len() - arg_count)
+                        .get(self.stack.len() - arg_count - 1)
                         .expect("Function should exist on the stack")
                     else {
                         return Err(RuntimeError::TypeError(
@@ -335,6 +337,18 @@ impl VM {
 
     fn current_frame(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("SHould have frame")
+    }
+
+    /// Pops a [Frame] from frames and removes the related stack arguments
+    fn pop_frame(&mut self) {
+        if let Some(frame) = self.frames.pop() {
+            // pop function params
+            for _ in 0..frame.borrow_function().arity {
+                self.stack.pop();
+            }
+            // pop function value
+            self.stack.pop();
+        }
     }
 }
 
@@ -485,6 +499,7 @@ impl TryFrom<u8> for OpCode {
             x if x == OpCode::JumpIfFalse as u8 => Ok(OpCode::JumpIfFalse),
             x if x == OpCode::Jump as u8 => Ok(OpCode::Jump),
             x if x == OpCode::Loop as u8 => Ok(OpCode::Loop),
+            x if x == OpCode::Call as u8 => Ok(OpCode::Call),
             _ => Err(()),
         }
     }
@@ -592,7 +607,10 @@ impl Frame {
 
     /// Read the next chunk byte and advance the IP
     fn read_u8(&mut self) -> Option<u8> {
-        self.borrow_function().chunk.code.get(self.ip).copied()
+        let byte = self.borrow_function().chunk.code.get(self.ip).copied();
+        self.ip += 1;
+
+        byte
     }
 
     /// Read the next u16 from the chunk that IP is pointing to
@@ -626,6 +644,97 @@ impl Frame {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    macro_rules! emit {
+        (
+            $chunk:expr;
+            $( $op:ident $( ( $operand:expr ) )? ; )*
+        ) => {{
+            let chunk = &mut $chunk;
+
+            $(
+                chunk.write_op(OpCode::$op, 1);
+                $(
+                    chunk.write($operand, 1);
+                )?
+            )*
+        }};
+    }
+
+    #[test]
+    fn vm_executes_top_level_frame() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let lhs = chunk.add_constant(Value::Number(20.0));
+        let rhs = chunk.add_constant(Value::Number(22.0));
+        let name = vm.heap.allocate(HeapObject::String("result".to_string()));
+        let name_index = chunk.add_constant(Value::Object(name));
+
+        emit! {
+            chunk;
+            Constant(lhs);
+            Constant(rhs);
+            Add;
+            DefineGlobal(name_index);
+            Nil;
+            Return;
+        }
+
+        let function = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk,
+            name: "script".to_string(),
+        }));
+
+        vm.interpret(function).expect("Top-level script should run");
+
+        assert_eq!(vm.globals.get("result"), Some(&Value::Number(42.0)));
+    }
+
+    #[test]
+    fn vm_executes_one_nested_call() {
+        let mut vm = VM::new();
+        let mut callee_chunk = Chunk::new();
+        let returned_value = callee_chunk.add_constant(Value::Number(22.0));
+        emit! {
+            callee_chunk;
+            Constant(returned_value);
+            Return;
+        }
+
+        let callee = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk: callee_chunk,
+            name: "twenty_two".to_string(),
+        }));
+
+        let mut script_chunk = Chunk::new();
+        let callee_index = script_chunk.add_constant(Value::Object(callee));
+        let addend = script_chunk.add_constant(Value::Number(20.0));
+        let name = vm.heap.allocate(HeapObject::String("result".to_string()));
+        let name_index = script_chunk.add_constant(Value::Object(name));
+
+        emit! {
+            script_chunk;
+            Constant(callee_index);
+            Call(0);
+            Constant(addend);
+            Add;
+            DefineGlobal(name_index);
+            Nil;
+            Return;
+        }
+
+        let script = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk: script_chunk,
+            name: "script".to_string(),
+        }));
+
+        vm.interpret(script).expect("Nested call should run");
+
+        assert_eq!(vm.globals.get("result"), Some(&Value::Number(42.0)));
+    }
 
     #[test]
     fn chunk_can_write_ops() {
