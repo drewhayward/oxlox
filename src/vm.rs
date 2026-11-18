@@ -272,6 +272,7 @@ impl VM {
                 }
                 OpCode::GetLocal => {
                     let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
+                    // TODO: need to adjust slot index based off current stack frame
                     self.stack.push(
                         self.stack
                             .get(stack_slot as usize)
@@ -281,6 +282,7 @@ impl VM {
                 }
                 OpCode::SetLocal => {
                     let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
+                    // TODO: need to adjust slot index based off current stack frame
                     let new_value = self
                         .stack
                         .last()
@@ -417,33 +419,125 @@ impl PartialEq for Value {
     }
 }
 
+/// Instruction signatures list bytecode operands, not values consumed from the stack.
+/// Operands follow the opcode byte; `u16` offsets are encoded big-endian.
 #[derive(Debug, PartialEq, Clone)]
 pub enum OpCode {
+    /// `Return`
+    ///
+    /// Pops a [Value] from the stack and unwinds a call frame or ends the script execution
     Return,
+    /// `Constant <constant_index: u8>`
+    ///
+    /// Pushes a [Value] from the current chunk values table onto the stack
     Constant,
+    /// `Negate`
+    ///
+    /// Pops a [Value] from the stack and pushes its negation
     Negate,
+    /// `Add`
+    ///
+    /// Pops two [Value]'s from the stack, attempts to add them and pushes the result
     Add,
+    /// `Subtract`
+    ///
+    /// Pops two [Value]'s from the stack, attempts to subtract them and pushes the result
     Subtract,
+    /// `Multiply`
+    ///
+    /// Pops two [Value]'s from the stack, attempts to multiply them and pushes the result
     Multiply,
+    /// `Divide`
+    ///
+    /// Pops two [Value]'s from the stack, attempts to divide them and pushes the result
     Divide,
+    /// `Nil`
+    ///
+    /// Pushes a [Value::Nil] onto the stack
     Nil,
+    /// `True`
+    ///
+    /// Pushes `Value::Bool(true)` onto the stack.
     True,
+    /// `False`
+    ///
+    /// Pushes `Value::Bool(false)` onto the stack.
     False,
+    /// `Not`
+    ///
+    /// Pops a [Value] from the stack, interprets the value as falsey or not and flips the result
     Not,
+    /// `Equal`
+    ///
+    /// Pops the right operand, then the left, and pushes whether they are equal.
     Equal,
+    /// `Greater`
+    ///
+    /// Pops the right operand, then the left, and pushes whether `left > right`.
+    /// Both operands must be numbers.
     Greater,
+    /// `Less`
+    ///
+    /// Pops the right operand, then the left, and pushes whether `left < right`.
+    /// Both operands must be numbers.
     Less,
+    /// `Print`
+    ///
+    /// Pops a [Value] and prints its display representation followed by a newline.
     Print,
+    /// `DefineGlobal <name_constant_index: u8>`
+    ///
+    /// Pops the initial value and binds it in the VM's globals table. The indexed
+    /// constant in the current chunk must be a string naming the global.
     DefineGlobal,
+    /// `GetGlobal <name_constant_index: u8>`
+    ///
+    /// Pushes a copy of a global's value. The indexed constant in the current
+    /// chunk must be a string naming an existing global.
     GetGlobal,
+    /// `SetGlobal <name_constant_index: u8>`
+    ///
+    /// Pops a value and stores it in the VM's globals table. The indexed constant
+    /// in the current chunk must be a string naming the global.
     SetGlobal,
-    /// Discard a value off the stack
+    /// `Pop`
+    ///
+    /// Discards the top value from the stack.
     Pop,
+    /// `GetLocal <slot: u8>`
+    ///
+    /// Pushes a copy of the value in the specified local slot. The current VM
+    /// interprets `slot` as an absolute value-stack index.
     GetLocal,
+    /// `SetLocal <slot: u8>`
+    ///
+    /// Copies the top value into the specified local slot without popping it.
+    /// The current VM interprets `slot` as an absolute value-stack index.
     SetLocal,
+    /// `JumpIfFalse <offset: u16>`
+    ///
+    /// Peeks at the top value and jumps forward if it is `nil` or `false`.
+    /// The value remains on the stack. The byte offset is measured from the
+    /// instruction pointer immediately after reading the operand.
     JumpIfFalse,
+    /// `Jump <offset: u16>`
+    ///
+    /// Unconditionally jumps forward by `offset` bytes, measured from the
+    /// instruction pointer immediately after reading the operand.
+    /// Does not change the value stack.
     Jump,
+    /// `Loop <offset: u16>`
+    ///
+    /// Unconditionally jumps backward by `offset` bytes, measured from the
+    /// instruction pointer immediately after reading the operand.
+    /// Does not change the value stack.
     Loop,
+    /// `Call <argument_count: u8>`
+    ///
+    /// Starts executing a function in a new frame. Before the call, the stack
+    /// must end with the function value followed by `argument_count` argument
+    /// values in order. The function and arguments remain on the stack when
+    /// entering the callee, and the caller's instruction pointer is preserved.
     Call,
 }
 
@@ -732,6 +826,80 @@ mod test {
         vm.interpret(script).expect("Nested call should run");
 
         assert_eq!(vm.globals.get("result"), Some(&Value::Number(42.0)));
+    }
+
+    #[test]
+    fn vm_binds_a_parameter_in_the_callee_frame() {
+        let mut vm = VM::new();
+        let mut callee_chunk = Chunk::new();
+        // Slot zero is the first parameter, relative to this invocation's locals.
+        emit! { callee_chunk; GetLocal(0); Return; }
+        let callee = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 1,
+            chunk: callee_chunk,
+            name: "identity".to_string(),
+        }));
+
+        let mut script_chunk = Chunk::new();
+        let caller_local = script_chunk.add_constant(Value::Number(20.0));
+        let callee_index = script_chunk.add_constant(Value::Object(callee));
+        let argument = script_chunk.add_constant(Value::Number(22.0));
+        emit! {
+            script_chunk;
+            Constant(caller_local);
+            Constant(callee_index);
+            Constant(argument);
+            Call(1);
+            GetLocal(0);
+            Add;
+            Return;
+        }
+
+        assert_eq!(
+            run_chunk(&mut vm, script_chunk).expect("Call with a parameter should run"),
+            Some(Value::Number(42.0))
+        );
+        assert!(vm.stack.is_empty(), "Returning must reclaim the call's stack values");
+        assert!(vm.frames.is_empty(), "Returning must remove all completed frames");
+    }
+
+    #[test]
+    fn vm_binds_a_local_in_the_callee_frame() {
+        let mut vm = VM::new();
+        let mut callee_chunk = Chunk::new();
+        let local_value = callee_chunk.add_constant(Value::Number(22.0));
+        // The initializer supplies callee-local slot zero; the copy is the return value.
+        emit! {
+            callee_chunk;
+            Constant(local_value);
+            GetLocal(0);
+            Return;
+        }
+        let callee = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk: callee_chunk,
+            name: "local_value".to_string(),
+        }));
+
+        let mut script_chunk = Chunk::new();
+        let caller_local = script_chunk.add_constant(Value::Number(20.0));
+        let callee_index = script_chunk.add_constant(Value::Object(callee));
+        emit! {
+            script_chunk;
+            Constant(caller_local);
+            Constant(callee_index);
+            Call(0);
+            GetLocal(0);
+            Add;
+            Return;
+        }
+
+        assert_eq!(
+            run_chunk(&mut vm, script_chunk).expect("Call with a local should run"),
+            Some(Value::Number(42.0))
+        );
+        assert!(vm.stack.is_empty(), "Returning must reclaim the call's stack values");
+        assert!(vm.frames.is_empty(), "Returning must remove all completed frames");
     }
 
     fn run_chunk(vm: &mut VM, chunk: Chunk) -> Result<Option<Value>, RuntimeError> {
