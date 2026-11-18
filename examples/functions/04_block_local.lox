@@ -1,0 +1,7 @@
+// A block-local function shadows the global without replacing it.
+var value = 20;
+{
+  fun value() {}
+  print value == value; // expect: true
+}
+print value; // expect: 20

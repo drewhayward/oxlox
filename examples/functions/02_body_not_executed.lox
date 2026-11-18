@@ -1,0 +1,5 @@
+// Declaring a function must not execute its body.
+fun unused() {
+  print "body should not run";
+}
+print "script continued"; // expect: script continued

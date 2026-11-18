@@ -1,17 +1,17 @@
-use std::borrow::BorrowMut;
 use std::{u16, u8};
 
-use crate::object::HeapObject;
+use nonempty::NonEmpty;
+
+use crate::heap::Gc;
+use crate::object::{Function, HeapObject};
 use crate::scanner::Scanner;
-use crate::vm::{Chunk, OpCode};
+use crate::scanner::TokenType::RightParen;
+use crate::vm::{Chunk, OpCode, Value};
 use crate::{
     heap::GcHeap,
     scanner::{Token, TokenType},
     vm,
 };
-
-// WIP: Pull the parser out of the compiler struct so we can stack the compilers and they share the
-// same parser/state
 
 #[derive(Debug, PartialEq, PartialOrd)]
 enum Precedence {
@@ -64,6 +64,7 @@ impl Precedence {
             TokenType::Bang => Precedence::Unary,
             // TokenType::Minus => Precedence::Call,
             TokenType::Dot => Precedence::Call,
+            TokenType::LeftParen => Precedence::Call,
             _ => Precedence::None,
         }
     }
@@ -128,6 +129,8 @@ impl Parser {
         }
     }
 
+    // TODO: Find a better way to express the expected_ttype which doesn't require instantiating the
+    // type
     /// Advance the compiler assuming the current token matches the expected type.
     /// Returns a compilation error if the token type doesn't match.
     fn consume_token(&mut self, expected_ttype: TokenType) -> Result<(), CompilationError> {
@@ -290,15 +293,27 @@ pub struct CompilationReport {
 #[derive(Debug)]
 struct FuncComplier {
     chunk: Chunk,
-    _enclosing: Option<Box<FuncComplier>>,
     lexical_stack: LexicalStack,
+}
+
+impl FuncComplier {
+    fn new() -> FuncComplier {
+        Self {
+            chunk: vm::Chunk::new(),
+            lexical_stack: LexicalStack::new(),
+        }
+    }
+
+    fn into_heap_object(mut self, heap: &mut GcHeap) -> Gc<HeapObject> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
 struct Compiler<'vm> {
     heap: &'vm mut GcHeap,
     parser: Parser,
-    current_function: Option<FuncComplier>,
+    functions: NonEmpty<FuncComplier>,
 }
 
 impl<'vm> Compiler<'vm> {
@@ -306,15 +321,12 @@ impl<'vm> Compiler<'vm> {
         Compiler {
             heap,
             parser,
-            current_function: Some(FuncComplier {
-                chunk: vm::Chunk::new(),
-                lexical_stack: LexicalStack::new(),
-                _enclosing: None,
-            }),
+            functions: NonEmpty::new(FuncComplier::new()),
         }
     }
 
-    fn compile(&mut self) -> Result<vm::Chunk, CompilationReport> {
+    // Making the compiler eat itself on compilation. If you want more you can create more.
+    fn compile(mut self) -> Result<Gc<HeapObject>, CompilationReport> {
         let mut errors: Vec<CompilationError> = Vec::new();
         let mut total_consumed = self.parser.total_consumed;
         while !self.parser.match_token(TokenType::Eof) {
@@ -340,76 +352,53 @@ impl<'vm> Compiler<'vm> {
             }
         }
 
-        //self.emit_op(vm::OpCode::Return);
         if self.parser.has_tokens() {
             panic!("Tokens remained after the EOF token")
         }
 
+        // Take out the top-level FuncComplier and register it in the heap
+        let NonEmpty {
+            head: script_compiler,
+            ..
+        } = self.functions;
 
-        // Extract out the compiled script function
-        Ok(self.current_function.take().unwrap().chunk)
+        let script_obj = self.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk: script_compiler.chunk,
+            name: "<script>".to_string(),
+        }));
+
+        Ok(script_obj)
     }
 
-    fn current_chunk(&mut self) -> Option<&mut vm::Chunk> {
-        self.current_function
-            .as_mut()
-            .map(|func_comp| func_comp.chunk.borrow_mut())
+    fn current_function(&mut self) -> &mut FuncComplier {
+        self.functions.last_mut()
+    }
+
+    fn current_chunk(&mut self) -> &mut vm::Chunk {
+        &mut self.current_function().chunk
     }
 
     /// Returns a mutable reference to the lexical stack of the function currently being compiled
     fn current_lexical_stack(&mut self) -> &mut LexicalStack {
-        self.current_function
-            .as_mut()
-            .unwrap()
-            .lexical_stack
-            .borrow_mut()
+        &mut self.current_function().lexical_stack
     }
 
-    //fn _error_at(&mut self, token: &Token, message: &str) {
-    //    eprint!("[line {}] Error", token.line);
-    //    match token.ttype {
-    //        TokenType::Eof => eprint!(" at end."),
-    //        TokenType::Error => {}
-    //        _ => eprint!(" at {:?} on line {}", token.ttype, token.line),
-    //    }
-    //
-    //    eprintln!("{}", message);
-    //    self._had_error = true;
-    //}
+    /// True only in the script's outermost scope, not inside a function or block.
+    fn is_global_scope(&self) -> bool {
+        self.functions.len() == 1 && self.functions.last().lexical_stack.current_depth() == 0
+    }
 
     /* Parsing Methods
      * These methods parse the token stream and emit bytecode at the same time.
      */
-    /// Returns true if the current token is equal to the provided type
-
-    /// Reset the parser to a good state from an error state by advancing to the next statement. Semicolons and statement
-    /// starting terms are used to determine when to stop advancing.
-    //fn sychronize(&mut self) {
-    //    self._had_error = false;
-    //
-    //    while self.current_token().ttype != TokenType::Eof {
-    //        if self.previous_token().ttype == TokenType::Semicolon {
-    //            return;
-    //        }
-    //
-    //        match self.current_token().ttype {
-    //            TokenType::Class => return,
-    //            TokenType::Fun => return,
-    //            TokenType::Var => return,
-    //            TokenType::For => return,
-    //            TokenType::If => return,
-    //            TokenType::While => return,
-    //            TokenType::Print => return,
-    //            TokenType::Return => return,
-    //            _ => {
-    //                self.advance_token();
-    //            }
-    //        }
-    //    }
-    //}
 
     fn parse_declaration(&mut self) -> Result<(), CompilationError> {
         match self.parser.current_token().ttype {
+            TokenType::Fun => {
+                self.parser.advance_token();
+                self.parse_fun_decl()
+            }
             TokenType::Var => {
                 self.parser.advance_token();
                 self.parse_variable_decl()
@@ -420,7 +409,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_variable_decl(&mut self) -> Result<(), CompilationError> {
-        let name_index = self.define_variable()?;
+        let (_, name_index) = self.define_variable()?;
 
         // Emit the variable declaration value
         if self.parser.match_token(TokenType::Equal) {
@@ -429,7 +418,7 @@ impl<'vm> Compiler<'vm> {
             self.emit_op(vm::OpCode::Nil);
         };
 
-        if self.current_lexical_stack().current_depth() > 0 {
+        if !self.is_global_scope() {
             self.parser.consume_token(TokenType::Semicolon)?;
             self.current_lexical_stack().mark_initialized();
             return Ok(());
@@ -444,26 +433,81 @@ impl<'vm> Compiler<'vm> {
         Ok(())
     }
 
-    /// Defines a variable as either a global or a local in the scope tracker. If it's a global,
-    /// return an index to the name constant in the code block, locals return Ok(None)
-    fn define_variable(&mut self) -> Result<Option<u8>, CompilationError> {
+    /// Parses tokens of the form
+    /// ```lox
+    /// fn foo(arg1) {
+    ///
+    /// }
+    /// ```
+    fn parse_fun_decl(&mut self) -> Result<(), CompilationError> {
+        let (func_name, func_name_index) = self.define_variable()?;
+        if let None = func_name_index {
+            self.current_lexical_stack().mark_initialized();
+        }
+
+        // parse args
+        self.parser.consume_token(TokenType::LeftParen)?;
+        self.functions.push(FuncComplier::new());
+
+        let mut arity = 0;
+        while !self.parser.match_token(TokenType::RightParen) {
+            // Args should never be global, so we don't need the global Some()
+            let _ = self.define_variable()?;
+            self.current_lexical_stack().mark_initialized();
+            arity += 1;
+
+            if !self.parser.match_token(TokenType::Comma) {
+                self.parser.consume_token(TokenType::RightParen)?;
+                break;
+            }
+        }
+
+        self.parser.consume_token(TokenType::LeftBrace)?;
+        self.parse_block()?;
+
+        // Ensure there is an implicit return
+        self.emit_op(OpCode::Nil);
+        self.emit_op(OpCode::Return);
+
+        let function_compiler = self.functions.pop().expect("should have function to pop");
+
+        let obj = self.heap.allocate(HeapObject::Fn(Function {
+            arity,
+            chunk: function_compiler.chunk,
+            name: func_name,
+        }));
+        self.emit_constant(Value::Object(obj));
+
+        // Register FuncComplier into local/globals
+        match func_name_index {
+            Some(func_name_index) => {
+                self.emit_op_and_arg(OpCode::DefineGlobal, func_name_index);
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    /// Registers a local or creates a global name constant in the current chunk.
+    /// Returns the identifier name and, for globals, its constant-table index.
+    fn define_variable(&mut self) -> Result<(String, Option<u8>), CompilationError> {
         self.parser.consume_token(TokenType::Identifier {
             name: String::default(),
         })?;
 
-        // In the case of a local variable, we don't need to do a runtime name-based lookup
-        if self.current_lexical_stack().current_depth() > 0 {
-            match self.parser.previous_token().ttype {
-                TokenType::Identifier { name } => self.current_lexical_stack().add_local(name)?,
-                _ => unreachable!("Previous token was just confirmed to be an Identifier"),
-            }
-            return Ok(None);
-        }
+        let TokenType::Identifier { name } = self.parser.previous_token().ttype else {
+            unreachable!("Previous token was just confirmed to be an Identifier");
+        };
 
-        match self.parser.previous_token().ttype {
-            TokenType::Identifier { name } => Ok(Some(self.make_identifier_constant(name))),
-            _ => unreachable!("Previous must be an Identifier token"),
-        }
+        let name_index = if self.is_global_scope() {
+            Some(self.make_identifier_constant(name.clone()))
+        } else {
+            self.current_lexical_stack().add_local(name.clone())?;
+            None
+        };
+
+        Ok((name, name_index))
     }
 
     fn parse_stmt(&mut self) -> Result<(), CompilationError> {
@@ -489,6 +533,10 @@ impl<'vm> Compiler<'vm> {
             TokenType::For => {
                 self.parser.advance_token();
                 self.parse_for()?;
+            }
+            TokenType::Return => {
+                self.parser.advance_token();
+                self.parse_return()?;
             }
             // Expr statement
             _ => {
@@ -547,7 +595,7 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_while(&mut self) -> Result<(), CompilationError> {
-        let loop_start = self.current_chunk().unwrap().code.len();
+        let loop_start = self.current_chunk().code.len();
 
         // Condition
         self.parser.consume_token(TokenType::LeftParen)?;
@@ -578,7 +626,7 @@ impl<'vm> Compiler<'vm> {
         }
 
         // Condition
-        let loop_start = self.current_chunk().unwrap().code.len();
+        let loop_start = self.current_chunk().code.len();
         let mut exit_jump: Option<usize> = None;
         if !self.parser.match_token(TokenType::Semicolon) {
             self.parse_expression()?;
@@ -592,7 +640,7 @@ impl<'vm> Compiler<'vm> {
         // increment step
         let mut increment_start: Option<usize> = None;
         if !(self.parser.match_token(TokenType::RightParen)) {
-            increment_start = Some(self.current_chunk().unwrap().code.len());
+            increment_start = Some(self.current_chunk().code.len());
 
             self.parse_expression()?;
             self.emit_op(OpCode::Pop);
@@ -617,6 +665,17 @@ impl<'vm> Compiler<'vm> {
         self.emit_op(OpCode::Pop);
         self.current_lexical_stack().end_scope();
 
+        Ok(())
+    }
+
+    fn parse_return(&mut self) -> Result<(), CompilationError> {
+        if self.parser.match_token(TokenType::Semicolon) {
+            self.emit_op(OpCode::Nil);
+        } else {
+            self.parse_expression()?;
+            self.parser.consume_token(TokenType::Semicolon)?;
+        }
+        self.emit_op(OpCode::Return);
         Ok(())
     }
 
@@ -684,6 +743,7 @@ impl<'vm> Compiler<'vm> {
             TokenType::Minus => Some(Compiler::handle_parse_binary),
             TokenType::Star => Some(Compiler::handle_parse_binary),
             TokenType::Slash => Some(Compiler::handle_parse_binary),
+            TokenType::LeftParen => Some(Compiler::handle_parse_call),
             // Logical comparison
             TokenType::EqualEqual => Some(Compiler::handle_parse_binary),
             TokenType::BangEqual => Some(Compiler::handle_parse_binary),
@@ -851,13 +911,32 @@ impl<'vm> Compiler<'vm> {
         Ok(())
     }
 
+    fn handle_parse_call(&mut self) -> Result<(), CompilationError> {
+        // expression for fun has already been consumed and (
+
+        let mut arg_count = 0;
+        while !self.parser.match_token(TokenType::RightParen) {
+            self.parse_expression()?;
+            arg_count += 1;
+
+            if !self.parser.match_token(TokenType::Comma) {
+                self.parser.consume_token(TokenType::RightBrace)?;
+            }
+        }
+        // TODO: Check for max args
+
+        self.emit_op_and_arg(OpCode::Call, arg_count as u8);
+
+        Ok(())
+    }
+
     /* Helper functions */
 
     fn make_identifier_constant(&mut self, name: String) -> u8 {
         let heap_ref = self.heap.allocate(HeapObject::String(name.clone()));
         let lox_value = vm::Value::Object(heap_ref);
 
-        let chunk = self.current_chunk().unwrap();
+        let chunk = self.current_chunk();
         let name_index = chunk.add_constant(lox_value);
 
         name_index
@@ -867,27 +946,23 @@ impl<'vm> Compiler<'vm> {
 
     fn emit_byte(&mut self, byte: u8) {
         let line = self.parser.previous_token().line;
-        self.current_chunk()
-            .expect("Chunk should be defined to write ops")
-            .write(byte, line);
+        self.current_chunk().write(byte, line);
     }
 
     fn emit_op(&mut self, op: vm::OpCode) {
         let line = self.parser.previous_token().line;
-        self.current_chunk()
-            .expect("Chunk should be defined to write ops")
-            .write_op(op, line);
+        self.current_chunk().write_op(op, line);
     }
 
     fn emit_op_and_arg(&mut self, op: vm::OpCode, arg: u8) {
         let line = self.parser.previous_token().line;
-        let chunk = self.current_chunk().expect("Chunk should be defined.");
+        let chunk = self.current_chunk();
         chunk.write_op(op, line);
         chunk.write(arg, line);
     }
 
     fn emit_constant(&mut self, value: vm::Value) {
-        let chunk = self.current_chunk().expect("Chunk should be defined.");
+        let chunk = self.current_chunk();
         let index = chunk.add_constant(value);
         self.emit_op_and_arg(vm::OpCode::Constant, index)
     }
@@ -899,12 +974,12 @@ impl<'vm> Compiler<'vm> {
         self.emit_byte(0);
 
         // Return index to the start of the two blank bytes so we can write in the location later
-        self.current_chunk().unwrap().code.len() - 2
+        self.current_chunk().code.len() - 2
     }
 
     /// Patches a jump with the current chunk location
     fn patch_jump(&mut self, patch_location: usize) {
-        let chunk = self.current_chunk().unwrap();
+        let chunk = self.current_chunk();
 
         // ...
         // JumpIfFalse
@@ -927,22 +1002,20 @@ impl<'vm> Compiler<'vm> {
     fn emit_loop(&mut self, jump_location: usize) {
         self.emit_op(OpCode::Loop);
 
-        let current_location = self.current_chunk().unwrap().code.len() - jump_location + 2;
+        let current_location = self.current_chunk().code.len() - jump_location + 2;
 
         self.emit_byte((current_location >> 8) as u8);
         self.emit_byte(current_location as u8);
     }
 }
 
-pub fn compile(source: String, heap: &mut GcHeap) -> Result<Chunk, CompilationReport> {
+pub fn compile(source: String, heap: &mut GcHeap) -> Result<Gc<HeapObject>, CompilationReport> {
     // In the book, he uses global C pointers which are accessible by all the functions. Here we'll
     // just need to keep those structs in scope in the compile function
     let scanner = Scanner::new(&source);
     let parser = Parser::new(scanner.collect());
 
-    let mut compiler = Compiler::new(heap, parser);
-
-    return compiler.compile();
+    Compiler::new(heap, parser).compile()
 }
 
 #[cfg(test)]
@@ -957,10 +1030,16 @@ mod test {
     }
 
     #[test]
-    fn it_emits_chunks() {
+    fn it_emits_a_script_function() {
         let mut heap = GcHeap::new();
-        let chunk = compile("".to_string(), &mut heap);
+        let script = compile("".to_string(), &mut heap).expect("Empty script should compile");
+        let script_object = script.borrow();
+        let HeapObject::Fn(function) = &*script_object else {
+            panic!("Compiler should return a function object");
+        };
 
-        assert!(chunk.unwrap().code.len() == 0, "Chunk should be empty")
+        assert_eq!(function.arity, 0);
+        assert_eq!(function.name, "<script>");
+        assert!(function.chunk.code.is_empty(), "Chunk should be empty");
     }
 }

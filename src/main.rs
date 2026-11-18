@@ -1,4 +1,4 @@
-use oxlox::{self, compiler::compile};
+use oxlox::{self, compiler::compile, object::HeapObject};
 use std::{fs, io::Read};
 
 fn help() {
@@ -18,12 +18,19 @@ fn run(args: Vec<String>) {
     let mut source: String = String::new();
     let _  = file.read_to_string(&mut source).expect("Failed to read file.");
 
-    let result = compile(source, &mut vm.heap);
-    let code_chunk = result.unwrap();
+    println!("== Source: {filename} ==\n{source}");
 
-    code_chunk.disassemble("Complied");
+    let script = compile(source, &mut vm.heap).expect("Script should compile");
 
-    // let _ = vm.interpret(&code_chunk).expect("Runs without problems");
+    {
+        let script_object = script.borrow();
+        let HeapObject::Fn(function) = &*script_object else {
+            unreachable!("Compiler should return a function object");
+        };
+        function.chunk.disassemble(&function.name);
+    }
+
+    let _ = vm.interpret(script).expect("Ran into a problem");
 }
 
 fn main() {

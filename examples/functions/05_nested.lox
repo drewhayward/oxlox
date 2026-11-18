@@ -1,0 +1,10 @@
+// Nested bodies use independent local slots; no enclosing locals are captured.
+fun outer(parameter) {
+  fun inner(parameter) {
+    print parameter;
+  }
+  print parameter;
+  print inner == inner;
+}
+// Neither function body should execute during declaration.
+print outer == outer; // expect: true

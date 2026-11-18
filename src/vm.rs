@@ -31,6 +31,7 @@ impl VM {
         self.frames.push(Frame {
             function: function,
             ip: 0,
+            stack_start: 0,
         });
 
         while let Some(current_byte) = self.current_frame().read_u8() {
@@ -41,9 +42,14 @@ impl VM {
             match op {
                 OpCode::Return => {
                     let frame_return = self.stack.pop().expect("Should have a value to pop.");
-                    self.pop_frame();
+                    // Pop off the frame locals
+                    if let Some(frame) = self.frames.pop() { 
+                        while self.stack.len() >= frame.stack_start {
+                            self.stack.pop();
+                        }
+                    }
                     if self.frames.is_empty() {
-                        return Ok(Some(frame_return))
+                        return Ok(Some(frame_return));
                     }
                     self.stack.push(frame_return);
                 }
@@ -271,18 +277,22 @@ impl VM {
                     let _ = self.stack.pop();
                 }
                 OpCode::GetLocal => {
-                    let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
-                    // TODO: need to adjust slot index based off current stack frame
+                    let frame_slot =
+                        self.current_frame().read_u8().expect("Stack slot exists") as usize;
+                    let stack_start = self.current_frame().stack_start;
+
                     self.stack.push(
                         self.stack
-                            .get(stack_slot as usize)
+                            .get(stack_start + frame_slot)
                             .expect("Local variable exists on the stack.")
                             .clone(),
                     )
                 }
                 OpCode::SetLocal => {
-                    let stack_slot = self.current_frame().read_u8().expect("Stack slot exists");
-                    // TODO: need to adjust slot index based off current stack frame
+                    let frame_slot =
+                        self.current_frame().read_u8().expect("Stack slot exists") as usize;
+                    let stack_start = self.current_frame().stack_start;
+
                     let new_value = self
                         .stack
                         .last()
@@ -290,7 +300,7 @@ impl VM {
                         .clone();
                     let variable_ref = self
                         .stack
-                        .get_mut(stack_slot as usize)
+                        .get_mut(stack_start + frame_slot)
                         .expect("local variable exists");
 
                     *variable_ref = new_value;
@@ -326,29 +336,19 @@ impl VM {
                     };
 
                     // - add a stack frame to `frames` and set ip appropriately
-                    self.frames
-                        .push(Frame::try_new(object.clone()).expect("object should be a function"));
+                    self.frames.push(
+                        Frame::try_new(object.clone(), self.stack.len() - arg_count)
+                            .expect("object should be a function"),
+                    );
                 }
             }
         }
 
-        Err(RuntimeError::NoReturn)
+        Ok(None)
     }
 
     fn current_frame(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("SHould have frame")
-    }
-
-    /// Pops a [Frame] from frames and removes the related stack arguments
-    fn pop_frame(&mut self) {
-        if let Some(frame) = self.frames.pop() {
-            // pop function params
-            for _ in 0..frame.borrow_function().arity {
-                self.stack.pop();
-            }
-            // pop function value
-            self.stack.pop();
-        }
     }
 }
 
@@ -682,16 +682,22 @@ pub struct Frame {
     function: Gc<HeapObject>,
     /// Code pointer into the function's [Chunk]. Always points to the next unread byte
     ip: usize,
+    /// Index in the values stack where this function's locals start
+    stack_start: usize,
 }
 
 impl Frame {
-    fn try_new(function: Gc<HeapObject>) -> Result<Frame, ()> {
+    fn try_new(function: Gc<HeapObject>, slot_start: usize) -> Result<Frame, ()> {
         // validate that heap ref points to a function once here so we can just unwrap in the
         // helpers. Assumes refs don't change type
         let is_func = matches!(*function.borrow(), HeapObject::Fn(_));
 
         if is_func {
-            Ok(Self { function, ip: 0 })
+            Ok(Self {
+                function,
+                ip: 0,
+                stack_start: slot_start,
+            })
         } else {
             Err(())
         }
@@ -859,8 +865,14 @@ mod test {
             run_chunk(&mut vm, script_chunk).expect("Call with a parameter should run"),
             Some(Value::Number(42.0))
         );
-        assert!(vm.stack.is_empty(), "Returning must reclaim the call's stack values");
-        assert!(vm.frames.is_empty(), "Returning must remove all completed frames");
+        assert!(
+            vm.stack.is_empty(),
+            "Returning must reclaim the call's stack values"
+        );
+        assert!(
+            vm.frames.is_empty(),
+            "Returning must remove all completed frames"
+        );
     }
 
     #[test]
@@ -898,8 +910,14 @@ mod test {
             run_chunk(&mut vm, script_chunk).expect("Call with a local should run"),
             Some(Value::Number(42.0))
         );
-        assert!(vm.stack.is_empty(), "Returning must reclaim the call's stack values");
-        assert!(vm.frames.is_empty(), "Returning must remove all completed frames");
+        assert!(
+            vm.stack.is_empty(),
+            "Returning must reclaim the call's stack values"
+        );
+        assert!(
+            vm.frames.is_empty(),
+            "Returning must remove all completed frames"
+        );
     }
 
     fn run_chunk(vm: &mut VM, chunk: Chunk) -> Result<Option<Value>, RuntimeError> {
@@ -1085,7 +1103,10 @@ mod test {
         let number = chunk.add_constant(Value::Number(42.0));
         emit! { chunk; Constant(number); True; Pop; Return; }
 
-        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert_eq!(
+            run_chunk(&mut vm, chunk).unwrap(),
+            Some(Value::Number(42.0))
+        );
     }
 
     #[test]
@@ -1104,7 +1125,10 @@ mod test {
             Return;
         }
 
-        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert_eq!(
+            run_chunk(&mut vm, chunk).unwrap(),
+            Some(Value::Number(42.0))
+        );
     }
 
     #[test]
@@ -1125,7 +1149,10 @@ mod test {
             Return;
         }
 
-        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert_eq!(
+            run_chunk(&mut vm, chunk).unwrap(),
+            Some(Value::Number(42.0))
+        );
         assert_eq!(vm.globals.get("answer"), Some(&Value::Number(42.0)));
     }
 
@@ -1142,7 +1169,10 @@ mod test {
         }
         emit! { chunk; Constant(result); Return; }
 
-        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert_eq!(
+            run_chunk(&mut vm, chunk).unwrap(),
+            Some(Value::Number(42.0))
+        );
         assert!(vm.stack.is_empty(), "Skipped instructions must not execute");
     }
 

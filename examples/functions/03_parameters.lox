@@ -1,0 +1,6 @@
+// Parameters are locals in the function's compilation context.
+fun add(left, right) {
+  print left + right;
+}
+// No call: this exercises declaration parsing and parameter resolution only.
+print add == add; // expect: true
