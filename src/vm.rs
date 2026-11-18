@@ -57,6 +57,7 @@ impl VM {
                     let frame_return = self.stack.pop().expect("Should have a value to pop.");
                     // Pop off the frame locals
                     if let Some(frame) = self.frames.pop() { 
+                        // TODO fix case when returning from top-level script
                         while self.stack.len() >= frame.stack_start {
                             self.stack.pop();
                         }

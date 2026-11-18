@@ -282,6 +282,8 @@ pub enum CompilationError {
     RedeclaredVariable,
     /// Use of variable in its own initializer
     VarSelfInitUse,
+    /// Use of a return statement in a top-level script context
+    TopLevelReturn
 }
 
 #[derive(Debug)]
@@ -542,6 +544,7 @@ impl<'vm> Compiler<'vm> {
             _ => {
                 self.parse_expression()?;
                 self.parser.consume_token(TokenType::Semicolon)?;
+                self.emit_op(OpCode::Pop);
             }
         }
 
@@ -669,6 +672,10 @@ impl<'vm> Compiler<'vm> {
     }
 
     fn parse_return(&mut self) -> Result<(), CompilationError> {
+        if self.functions.len() == 1 {
+            return Err(CompilationError::TopLevelReturn)
+        }
+
         if self.parser.match_token(TokenType::Semicolon) {
             self.emit_op(OpCode::Nil);
         } else {
@@ -920,7 +927,7 @@ impl<'vm> Compiler<'vm> {
             arg_count += 1;
 
             if !self.parser.match_token(TokenType::Comma) {
-                self.parser.consume_token(TokenType::RightBrace)?;
+                self.parser.consume_token(TokenType::RightParen)?;
             }
         }
         // TODO: Check for max args
