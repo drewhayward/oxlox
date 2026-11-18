@@ -1,10 +1,11 @@
 use core::panic;
 use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fmt, u16};
 
 use crate::heap::{Gc, GcHeap};
-use crate::object::{Function, HeapObject};
+use crate::object::{Function, HeapObject, NativeFn, NativeFunction};
 
 #[derive(Debug)]
 pub struct VM {
@@ -17,13 +18,25 @@ pub struct VM {
 
 impl VM {
     pub fn new() -> VM {
-        VM {
+        let mut vm = VM {
             heap: GcHeap::new(),
             debug: false,
             stack: Vec::new(),
             frames: Vec::new(),
             globals: HashMap::new(),
-        }
+        };
+        vm.define_native("clock", 0, clock);
+        vm
+    }
+
+    /// Binds a Rust function pointer as a callable global value.
+    pub fn define_native(&mut self, name: &str, arity: u8, function: NativeFn) {
+        let native = self.heap.allocate(HeapObject::Native(NativeFunction {
+            arity,
+            name: name.to_string(),
+            function,
+        }));
+        self.globals.insert(name.to_string(), Value::Object(native));
     }
 
     pub fn interpret(&mut self, function: Gc<HeapObject>) -> Result<Option<Value>, RuntimeError> {
@@ -322,24 +335,11 @@ impl VM {
                     self.current_frame().ip -= jump_offset;
                 }
                 OpCode::Call => {
-                    let arg_count = self.current_frame().read_u8().expect("") as usize;
-
-                    // Lookup the object which should be a function and handle exceptions to that
-                    let Value::Object(object) = self
-                        .stack
-                        .get(self.stack.len() - arg_count - 1)
-                        .expect("Function should exist on the stack")
-                    else {
-                        return Err(RuntimeError::TypeError(
-                            "Expected an Object, got some other primative".to_string(),
-                        ));
-                    };
-
-                    // - add a stack frame to `frames` and set ip appropriately
-                    self.frames.push(
-                        Frame::try_new(object.clone(), self.stack.len() - arg_count)
-                            .expect("object should be a function"),
-                    );
+                    let arg_count = self
+                        .current_frame()
+                        .read_u8()
+                        .expect("Expected argument count following call op.") as usize;
+                    self.call_value(arg_count)?;
                 }
             }
         }
@@ -350,6 +350,52 @@ impl VM {
     fn current_frame(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("SHould have frame")
     }
+
+    fn call_value(&mut self, arg_count: usize) -> Result<(), RuntimeError> {
+        let callee_index = self
+            .stack
+            .len()
+            .checked_sub(arg_count + 1)
+            .expect("Call requires a callable followed by its arguments");
+        let Value::Object(object) = self.stack[callee_index].clone() else {
+            return Err(RuntimeError::TypeError("Can only call functions.".to_string()));
+        };
+        let callable = object.borrow();
+        let expected = match &*callable {
+            HeapObject::Fn(function) => function.arity as usize,
+            HeapObject::Native(native) => native.arity as usize,
+            _ => return Err(RuntimeError::TypeError("Can only call functions.".to_string())),
+        };
+        if arg_count != expected {
+            return Err(RuntimeError::TypeError(format!(
+                "Expected {expected} arguments but got {arg_count}."
+            )));
+        }
+
+        match &*callable {
+            HeapObject::Fn(_) => {
+                self.frames.push(
+                    Frame::try_new(object.clone(), callee_index + 1)
+                        .expect("Callable was validated as a Lox function"),
+                );
+            }
+            HeapObject::Native(native) => {
+                let result = (native.function)(&self.stack[callee_index + 1..])?;
+                self.stack.truncate(callee_index);
+                self.stack.push(result);
+            }
+            _ => unreachable!("Callable type was already validated"),
+        }
+        Ok(())
+    }
+}
+
+/// Returns wall-clock seconds since the Unix epoch, including fractional seconds.
+fn clock(_args: &[Value]) -> Result<Value, RuntimeError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| RuntimeError::NativeError(error.to_string()))?;
+    Ok(Value::Number(elapsed.as_secs_f64()))
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +444,7 @@ impl fmt::Display for Value {
             Value::Object(object) => match &*object.borrow() {
                 HeapObject::String(value) => write!(f, "{}", value),
                 HeapObject::Fn(func) => write!(f, "{}<{}>", func.name, func.arity),
+                HeapObject::Native(_) => write!(f, "<native fn>"),
             },
         }
     }
@@ -534,10 +581,11 @@ pub enum OpCode {
     Loop,
     /// `Call <argument_count: u8>`
     ///
-    /// Starts executing a function in a new frame. Before the call, the stack
-    /// must end with the function value followed by `argument_count` argument
-    /// values in order. The function and arguments remain on the stack when
-    /// entering the callee, and the caller's instruction pointer is preserved.
+    /// Calls a Lox or native function with `argument_count` arguments. The stack
+    /// must end with the callable followed by argument values in source order.
+    /// Lox calls push a frame; native calls execute a Rust function pointer
+    /// immediately. Both replace the callable and arguments with one result
+    /// when they complete, preserving the caller's other values.
     Call,
 }
 
@@ -664,6 +712,8 @@ impl Chunk {
 pub enum RuntimeError {
     /// Tried to use a value of an incorrect type.
     TypeError(String),
+    /// A host function failed while executing.
+    NativeError(String),
     /// Attempted to divide by zero.
     DivideByZero,
     /// Code chunk ended without a return instruction.
@@ -918,6 +968,198 @@ mod test {
             vm.frames.is_empty(),
             "Returning must remove all completed frames"
         );
+    }
+
+    fn native_subtract(args: &[Value]) -> Result<Value, RuntimeError> {
+        let [Value::Number(lhs), Value::Number(rhs)] = args else {
+            return Err(RuntimeError::TypeError("Expected two numbers.".to_string()));
+        };
+        Ok(Value::Number(lhs - rhs))
+    }
+
+    fn native_answer(_args: &[Value]) -> Result<Value, RuntimeError> {
+        Ok(Value::Number(22.0))
+    }
+
+    fn native_failure(_args: &[Value]) -> Result<Value, RuntimeError> {
+        Err(RuntimeError::NativeError("native failed".to_string()))
+    }
+
+    #[test]
+    fn vm_calls_a_native_with_arguments_and_preserves_caller_values() {
+        let mut vm = VM::new();
+        vm.define_native("subtract", 2, native_subtract);
+        let mut chunk = Chunk::new();
+        let caller_value = chunk.add_constant(Value::Number(20.0));
+        let name = vm.heap.allocate(HeapObject::String("subtract".to_string()));
+        let name_index = chunk.add_constant(Value::Object(name));
+        let lhs = chunk.add_constant(Value::Number(50.0));
+        let rhs = chunk.add_constant(Value::Number(28.0));
+        emit! {
+            chunk;
+            Constant(caller_value);
+            GetGlobal(name_index);
+            Constant(lhs);
+            Constant(rhs);
+            Call(2);
+            Add;
+            Return;
+        }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert!(vm.stack.is_empty());
+        assert!(vm.frames.is_empty());
+    }
+
+    #[test]
+    fn vm_calls_a_native_from_a_lox_function() {
+        let mut vm = VM::new();
+        vm.define_native("answer", 0, native_answer);
+        let mut callee_chunk = Chunk::new();
+        let name = vm.heap.allocate(HeapObject::String("answer".to_string()));
+        let name_index = callee_chunk.add_constant(Value::Object(name));
+        emit! { callee_chunk; GetGlobal(name_index); Call(0); Return; }
+        let callee = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 0,
+            chunk: callee_chunk,
+            name: "wrapper".to_string(),
+        }));
+
+        let mut chunk = Chunk::new();
+        let caller_value = chunk.add_constant(Value::Number(20.0));
+        let callee_index = chunk.add_constant(Value::Object(callee));
+        emit! {
+            chunk;
+            Constant(caller_value);
+            Constant(callee_index);
+            Call(0);
+            Add;
+            Return;
+        }
+
+        assert_eq!(run_chunk(&mut vm, chunk).unwrap(), Some(Value::Number(42.0)));
+        assert!(vm.stack.is_empty());
+        assert!(vm.frames.is_empty());
+    }
+
+    #[test]
+    fn vm_registers_clock_as_a_callable_global() {
+        let mut vm = VM::new();
+        let mut chunk = Chunk::new();
+        let name = vm.heap.allocate(HeapObject::String("clock".to_string()));
+        let name_index = chunk.add_constant(Value::Object(name));
+        emit! { chunk; GetGlobal(name_index); Call(0); Return; }
+
+        let Some(Value::Number(seconds)) = run_chunk(&mut vm, chunk).unwrap() else {
+            std::panic!("clock should return a number");
+        };
+        assert!(seconds.is_finite() && seconds > 0.0);
+        assert!(vm.stack.is_empty());
+        assert!(vm.frames.is_empty());
+    }
+
+    #[test]
+    fn vm_calls_natives_through_compiled_lox() {
+        let mut vm = VM::new();
+        let script = crate::compiler::compile(
+            "fun now() { return clock(); } var readClock = now; var stamp = readClock();"
+                .to_string(),
+            &mut vm.heap,
+        )
+        .expect("Native calls should compile without special syntax");
+
+        vm.interpret(script).expect("Native calls should execute");
+
+        let Value::Number(seconds) = &vm.globals["stamp"] else {
+            std::panic!("The native result should reach the global initializer");
+        };
+        assert!(seconds.is_finite() && *seconds > 0.0);
+    }
+
+    #[test]
+    fn vm_rejects_wrong_native_arity_before_invoking_the_pointer() {
+        let mut vm = VM::new();
+        vm.define_native("never_called", 1, |_| {
+            std::panic!("Wrong arity must be rejected before invoking the native")
+        });
+        let mut chunk = Chunk::new();
+        let native = chunk.add_constant(vm.globals["never_called"].clone());
+        emit! { chunk; Constant(native); Call(0); Return; }
+
+        assert!(matches!(
+            run_chunk(&mut vm, chunk),
+            Err(RuntimeError::TypeError(message))
+                if message == "Expected 1 arguments but got 0."
+        ));
+    }
+
+    #[test]
+    fn vm_rejects_wrong_lox_function_arity() {
+        let mut vm = VM::new();
+        let mut callee_chunk = Chunk::new();
+        emit! { callee_chunk; Nil; Return; }
+        let callee = vm.heap.allocate(HeapObject::Fn(Function {
+            arity: 1,
+            chunk: callee_chunk,
+            name: "requires_argument".to_string(),
+        }));
+        let mut chunk = Chunk::new();
+        let callee_index = chunk.add_constant(Value::Object(callee));
+        emit! { chunk; Constant(callee_index); Call(0); Return; }
+
+        assert!(matches!(
+            run_chunk(&mut vm, chunk),
+            Err(RuntimeError::TypeError(message))
+                if message == "Expected 1 arguments but got 0."
+        ));
+    }
+
+    #[test]
+    fn vm_propagates_native_errors() {
+        let mut vm = VM::new();
+        vm.define_native("fail", 0, native_failure);
+        let mut chunk = Chunk::new();
+        let native = chunk.add_constant(vm.globals["fail"].clone());
+        emit! { chunk; Constant(native); Call(0); Return; }
+
+        assert!(matches!(
+            run_chunk(&mut vm, chunk),
+            Err(RuntimeError::NativeError(message)) if message == "native failed"
+        ));
+    }
+
+    #[test]
+    fn vm_rejects_non_callable_values() {
+        for is_string in [false, true] {
+            let mut vm = VM::new();
+            let mut chunk = Chunk::new();
+            let value = if is_string {
+                Value::Object(vm.heap.allocate(HeapObject::String("not callable".to_string())))
+            } else {
+                Value::Number(42.0)
+            };
+            let constant = chunk.add_constant(value);
+            emit! { chunk; Constant(constant); Call(0); Return; }
+
+            assert!(matches!(
+                run_chunk(&mut vm, chunk),
+                Err(RuntimeError::TypeError(message)) if message == "Can only call functions."
+            ));
+        }
+    }
+
+    #[test]
+    fn native_function_values_compare_by_object_identity() {
+        let mut vm = VM::new();
+        vm.define_native("answer", 0, native_answer);
+        let original = vm.globals["answer"].clone();
+        let alias = original.clone();
+        vm.define_native("answer", 0, native_answer);
+        let replacement = vm.globals["answer"].clone();
+
+        assert_eq!(original, alias);
+        assert_ne!(original, replacement);
+        assert_eq!(original.to_string(), "<native fn>");
     }
 
     fn run_chunk(vm: &mut VM, chunk: Chunk) -> Result<Option<Value>, RuntimeError> {
